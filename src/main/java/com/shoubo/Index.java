@@ -1,15 +1,16 @@
 package com.shoubo;
 
 import com.shoubo.exception.UncategorizedIndexException;
+import com.shoubo.model.bo.SearchResultBO;
 import com.shoubo.utils.NamedThreadFactory;
 
-import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Optional;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 /**
  * Author: shoubo
@@ -24,7 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public interface Index<TId, TVector, TItem extends Item<TId, TVector>, TDistance> extends Serializable {
 
     /**
-     * 默认情况下，在索引固定数量item后，将进度报告给Listener
+     * 进度报告频率：默认情况下，在索引固定数量item后，将进度报告给Listener
      */
     int DEFAULT_PROGRESS_UPDATE_INTERVAL = 100_000;
 
@@ -76,18 +77,20 @@ public interface Index<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 将多个item添加到index中。每添加 progressUpdateInterval 个元素时，会将进度报告给传入的 listener。
-     *      *
-     * @param items
-     * @param numThreads
-     * @param listener
-     * @param progressUpdateInterval
-     * @throws InterruptedException
+     * 使用线程池来实现并行添加项到索引，并提供进度报告
+     * @param items items
+     * @param numThreads numThreads
+     * @param listener listener
+     * @param progressUpdateInterval progressUpdateInterval
+     * @throws InterruptedException 异常
      */
     default void addAll(Collection<TItem> items, int numThreads, ProgressListener listener, int progressUpdateInterval)
             throws InterruptedException {
+        // 创建线程池，使用无界阻塞队列作为任务队列，采用自定义线程工厂
         ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(numThreads, numThreads, 60L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(),
                 new NamedThreadFactory("index-%d"));
+        // 允许核心线程超时
         threadPoolExecutor.allowCoreThreadTimeOut(true);
 
         int numItems = items.size();
@@ -95,23 +98,26 @@ public interface Index<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         AtomicInteger workDone = new AtomicInteger();
 
         try {
-            LinkedBlockingQueue<TItem> blockingQueue = new LinkedBlockingQueue<>(items);
+            // 创建一个 LinkedBlockingQueue，将传入的项集合作为初始队列，每个线程从队列中获取项进行添加操作
+            LinkedBlockingQueue<TItem> itemsQueue = new LinkedBlockingQueue<>(items);
+            // 保存提交给线程池的任务的返回结果
             List<Future<?>> futures = new ArrayList<>();
 
             for (int threadId = 0; threadId < numThreads; threadId++) {
+                // 使用 Lambda 表达式来定义了一个匿名的 Runnable 对象，作为线程池中线程的执行任务。
                 futures.add(threadPoolExecutor.submit(() -> {
                     TItem item;
-                    while ((item = blockingQueue.poll()) != null) {
+                    while ((item = itemsQueue.poll()) != null) {
                         add(item);
-
                         int done = workDone.incrementAndGet();
+                        // 控制进度更新
                         if (done % progressUpdateInterval == 0 || numItems == done) {
                             listener.updateProgress(done, items.size());
                         }
                     }
                 }));
             }
-
+            // 等待所有任务执行完成，使用 Future.get() 获取任务的结果
             for (Future<?> future : futures) {
                 try {
                     future.get();
@@ -124,6 +130,11 @@ public interface Index<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
+    /**
+     * 获得Index大小
+     * @return Index大小
+     */
+    int size();
 
     /**
     * 根据item的id返回该item
@@ -132,4 +143,60 @@ public interface Index<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     *
     */
     Optional<TItem> get(TId id);
+
+    /**
+     * 获得Index的所有items 集合形式
+     * @return Index包含的所有items
+     */
+    Collection<TItem> items();
+
+    /**
+     * 找到距离传入向量vector最近的k个item
+     * @param vector 向量
+     * @param k 数目
+     * @return SearchResultBO列表
+     */
+    List<SearchResultBO<TItem, TDistance>> findNearest(TVector vector, int k);
+
+    /**
+     * 查找与指定ID对应的item最接近的k个邻居items
+     * @param id ID
+     * @param k 数目
+     * @return items列表
+     */
+    default List<SearchResultBO<TItem, TDistance>> findNeighbors(TId id, int k) {
+        return get(id).map(item -> findNearest(item.vector(), k+1).stream() // 将k个邻居item转为stream
+                .filter(result -> !result.getItem().id().equals(id))    // 排除自身
+                .limit(k)   // 限制k个
+                .collect(Collectors.toList())) // 将结果保留到List中
+                .orElse(Collections.emptyList());
+    }
+
+    /**
+     * 将Index保存为输出流
+     * 注意：保存操作不是线程安全的，不要在保存的同时修改Index
+     * @param out Index的输出流
+     * @throws IOException IO异常
+     */
+    void save(OutputStream out) throws IOException;
+
+    /**
+     * 将Index保存为文件
+     * 注意：保存操作不是线程安全的，期间不能修改Index
+     * @param file Index的保存文件
+     * @throws IOException IO异常
+     */
+    default void save(File file) throws IOException {
+        save(Files.newOutputStream(file.toPath()));
+    }
+
+    /**
+     * 将Index保存为指定的文件路径
+     * 注意：保存操作非线程安全，期间不能修改Index
+     * @param path 指定文件路径
+     * @throws IOException IO异常
+     */
+    default void save(Path path) throws IOException {
+        save(Files.newOutputStream(path));
+    }
 }
