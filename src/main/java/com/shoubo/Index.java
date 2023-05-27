@@ -1,6 +1,8 @@
 package com.shoubo;
 
 import com.shoubo.exception.UncategorizedIndexException;
+import com.shoubo.listener.NullProgressListener;
+import com.shoubo.listener.ProgressListener;
 import com.shoubo.model.bo.SearchResultBO;
 import com.shoubo.utils.NamedThreadFactory;
 
@@ -199,4 +201,5 @@ public interface Index<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     default void save(Path path) throws IOException {
         save(Files.newOutputStream(path));
     }
+
 }

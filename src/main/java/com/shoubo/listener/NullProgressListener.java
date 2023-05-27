@@ -1,11 +1,11 @@
-package com.shoubo;
+package com.shoubo.listener;
 
 /**
  * Author: shoubo
  * Date: 2023/5/24
  * Desc: 定义了一个名为 NullProgressListener 的类，它实现了 ProgressListener 接口，并提供了一个什么都不做的实现。
  */
-public class NullProgressListener implements ProgressListener{
+public class NullProgressListener implements ProgressListener {
 
     /*
     * NullProgressListener 的一个单例实例，用于方便使用。由于进度监听器本身没有状态，因此可以共享一个实例。
