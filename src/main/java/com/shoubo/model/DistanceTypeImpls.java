@@ -5,13 +5,13 @@ package com.shoubo.model;
  * Date: 2023/5/27
  * Desc: 距离函数，计算两向量之间的距离
  */
-public enum DistanceImpls {
+public enum DistanceTypeImpls {
     INSTANCE;
 
     /**
      * 计算两个稀疏向量之间的距离
      */
-    static class FloatSparseVectorInnerProduct implements Distance<SparseVector<float[]>, Float> {
+    static class FloatSparseVectorInnerProduct implements DistanceType<SparseVector<float[]>, Float> {
         /**
          * 计算两个稀疏向量之间的距离
          *
@@ -50,7 +50,7 @@ public enum DistanceImpls {
     /**
      * 计算两个稀疏向量之间的距离
      */
-    static class DoubleSparseVectorInnerProduct implements Distance<SparseVector<double[]>, Double> {
+    static class DoubleSparseVectorInnerProduct implements DistanceType<SparseVector<double[]>, Double> {
 
         /**
          * 计算两个稀疏向量之间的距离
@@ -87,7 +87,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的余弦距离
      */
-    static class FloatCosineDistance implements Distance<float[], Float> {
+    static class FloatCosineDistance implements DistanceType<float[], Float> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -116,7 +116,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的余弦距离
      */
-    static class DoubleCosineDistance implements Distance<double[], Double> {
+    static class DoubleCosineDistance implements DistanceType<double[], Double> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -145,7 +145,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的内积
      */
-    static class FloatInnerProduct implements Distance<float[], Float> {
+    static class FloatInnerProduct implements DistanceType<float[], Float> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -169,7 +169,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的内积
      */
-    static class DoubleInnerProduct implements Distance<double[], Double> {
+    static class DoubleInnerProduct implements DistanceType<double[], Double> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -193,7 +193,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的欧氏距离
      */
-    static class FloatEuclideanDistance implements Distance<float[], Float> {
+    static class FloatEuclideanDistance implements DistanceType<float[], Float> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -218,7 +218,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的欧氏距离
      */
-    static class DoubleEuclideanDistance implements Distance<double[], Double> {
+    static class DoubleEuclideanDistance implements DistanceType<double[], Double> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -243,7 +243,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的坎贝拉距离
      */
-    static class FloatCanberraDistance implements Distance<float[], Float> {
+    static class FloatCanberraDistance implements DistanceType<float[], Float> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -265,7 +265,7 @@ public enum DistanceImpls {
         }
     }
 
-    static class DoubleCanberraDistance implements Distance<double[], Double> {
+    static class DoubleCanberraDistance implements DistanceType<double[], Double> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -290,7 +290,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的BrayCurtis距离
      */
-    static class FloatBrayCurtisDistance implements Distance<float[], Float> {
+    static class FloatBrayCurtisDistance implements DistanceType<float[], Float> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -316,7 +316,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的BrayCurtis距离
      */
-    static class DoubleBrayCurtisDistance implements Distance<double[], Double> {
+    static class DoubleBrayCurtisDistance implements DistanceType<double[], Double> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -342,7 +342,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的相关系数距离
      */
-    static class FloatCorrelationDistance implements Distance<float[], Float> {
+    static class FloatCorrelationDistance implements DistanceType<float[], Float> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -384,7 +384,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的相关系数距离
      */
-    static class DoubleCorrelationDistance implements Distance<double[], Double> {
+    static class DoubleCorrelationDistance implements DistanceType<double[], Double> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -426,7 +426,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的曼哈顿距离
      */
-    static class FloatManhattanDistance implements Distance<float[], Float> {
+    static class FloatManhattanDistance implements DistanceType<float[], Float> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -450,7 +450,7 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的曼哈顿距离
      */
-    static class DoubleManhattanDistance implements Distance<double[], Double> {
+    static class DoubleManhattanDistance implements DistanceType<double[], Double> {
         // 序列化版本号
         private static final long serialVersionUID = 1L;
 
@@ -474,49 +474,49 @@ public enum DistanceImpls {
     /**
      * 计算两向量之间的余弦距离
      */
-    public static final Distance<float[], Float> FLOAT_COSINE_DISTANCE = new FloatCosineDistance();
-    public static final Distance<double[], Double> DOUBLE_COSINE_DISTANCE = new DoubleCosineDistance();
+    public static final DistanceType<float[], Float> FLOAT_COSINE_DISTANCE = new FloatCosineDistance();
+    public static final DistanceType<double[], Double> DOUBLE_COSINE_DISTANCE = new DoubleCosineDistance();
 
     /**
      * 计算两向量之间的点积距离
      */
-    public static final Distance<float[], Float> FLOAT_INNER_PRODUCT = new FloatInnerProduct();
-    public static final Distance<double[], Double> DOUBLE_INNER_PRODUCT = new DoubleInnerProduct();
+    public static final DistanceType<float[], Float> FLOAT_INNER_PRODUCT = new FloatInnerProduct();
+    public static final DistanceType<double[], Double> DOUBLE_INNER_PRODUCT = new DoubleInnerProduct();
 
     /**
      * 计算两向量之间的欧氏距离
      */
-    public static final Distance<float[], Float> FLOAT_EUCLIDEAN_DISTANCE = new FloatEuclideanDistance();
-    public static final Distance<double[], Double> DOUBLE_EUCLIDEAN_DISTANCE = new DoubleEuclideanDistance();
+    public static final DistanceType<float[], Float> FLOAT_EUCLIDEAN_DISTANCE = new FloatEuclideanDistance();
+    public static final DistanceType<double[], Double> DOUBLE_EUCLIDEAN_DISTANCE = new DoubleEuclideanDistance();
 
     /**
      * 计算两向量之间的BrayCurtis距离
      */
-    public static final Distance<float[], Float> FLOAT_BRAY_CURTIS_DISTANCE = new FloatBrayCurtisDistance();
-    public static final Distance<double[], Double> DOUBLE_BRAY_CURTIS_DISTANCE = new DoubleBrayCurtisDistance();
+    public static final DistanceType<float[], Float> FLOAT_BRAY_CURTIS_DISTANCE = new FloatBrayCurtisDistance();
+    public static final DistanceType<double[], Double> DOUBLE_BRAY_CURTIS_DISTANCE = new DoubleBrayCurtisDistance();
 
     /**
      * 计算两向量之间的Canberra距离
      */
-    public static final Distance<float[], Float> FLOAT_CANBERRA_DISTANCE = new FloatCanberraDistance();
-    public static final Distance<double[], Double> DOUBLE_CANBERRA_DISTANCE = new DoubleCanberraDistance();
+    public static final DistanceType<float[], Float> FLOAT_CANBERRA_DISTANCE = new FloatCanberraDistance();
+    public static final DistanceType<double[], Double> DOUBLE_CANBERRA_DISTANCE = new DoubleCanberraDistance();
 
     /**
      * 计算两向量之间的相关系数距离
      */
-    public static final Distance<float[], Float> FLOAT_CORRELATION_DISTANCE = new FloatCorrelationDistance();
-    public static final Distance<double[], Double> DOUBLE_CORRELATION_DISTANCE = new DoubleCorrelationDistance();
+    public static final DistanceType<float[], Float> FLOAT_CORRELATION_DISTANCE = new FloatCorrelationDistance();
+    public static final DistanceType<double[], Double> DOUBLE_CORRELATION_DISTANCE = new DoubleCorrelationDistance();
 
     /**
      * 计算两向量之间的曼哈顿距离
      */
-    public static final Distance<float[], Float> FLOAT_MANHATTAN_DISTANCE = new FloatManhattanDistance();
-    public static final Distance<double[], Double> DOUBLE_MANHATTAN_DISTANCE = new DoubleManhattanDistance();
+    public static final DistanceType<float[], Float> FLOAT_MANHATTAN_DISTANCE = new FloatManhattanDistance();
+    public static final DistanceType<double[], Double> DOUBLE_MANHATTAN_DISTANCE = new DoubleManhattanDistance();
 
     /**
      * 计算两稀疏向量之间的内积距离
      */
-    public static final Distance<SparseVector<float[]>, Float> FLOAT_SPARSE_VECTOR_INNER_PRODUCT = new FloatSparseVectorInnerProduct();
-    public static final Distance<SparseVector<double[]>, Double> DOUBLE_SPARSE_VECTOR_INNER_PRODUCT = new DoubleSparseVectorInnerProduct();
+    public static final DistanceType<SparseVector<float[]>, Float> FLOAT_SPARSE_VECTOR_INNER_PRODUCT = new FloatSparseVectorInnerProduct();
+    public static final DistanceType<SparseVector<double[]>, Double> DOUBLE_SPARSE_VECTOR_INNER_PRODUCT = new DoubleSparseVectorInnerProduct();
 
 }

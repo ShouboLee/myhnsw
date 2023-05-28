@@ -11,7 +11,7 @@ import java.io.Serializable;
  * @param <TDistance> 距离类型
  */
 @FunctionalInterface
-public interface Distance<TVector, TDistance> extends Serializable {
+public interface DistanceType<TVector, TDistance> extends Serializable {
 
     /**
      * 计算两向量之间的距离
