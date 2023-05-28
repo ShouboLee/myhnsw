@@ -49,65 +49,155 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     private static final long serialVersionUID = 1L;
 
     /**
-     * 用于生成线程名称的原子计数器
+     * 无效节点的标识符
      */
     private static final int NO_NODE_ID = -1;
 
     /**
-     * 距离类型选择器
+     * 距离类型选择器 用于计算向量之间的距离
      */
     private DistanceType<TVector, TDistance> distanceType;
 
     /**
-     * 距离比较器
+     * 距离比较器 用于比较两个距离的大小
      */
     private Comparator<TDistance> distanceComparator;
 
     /**
-     * 距离比较器，用于比较距离的最大值
+     * 距离比较器 用于比较距离是否超过最大值
+     * 在HNSW算法中，需要判断距离是否超过某个阈值（通常是最大距离），以确定是否需要进行进一步的搜索
      */
     private MaxValueComparator<TDistance> maxValueDistanceComparator;
 
+    /**
+     * 向量的维度
+     */
     private int dimensions;
 
+    /**
+     * Index中每个节点允许的最大item数。
+     * HNSW算法将数据点存储在Index的节点中 定义了每个节点能够容纳的最大数据点数目。
+     */
     private int maxItemCount;
 
+    /**
+     * 每个节点中的连接数
+     * HNSW算法中的每个节点都与其他节点相连，m表示每个节点在构建时要建立的连接数。
+     * 较大的m值可以提供更好的搜索准确性，但会增加索引构建和搜索的时间复杂度。
+     */
     private int m;
 
+    /**
+     * 每个节点中的最大连接数。
+     * 在HNSW算法中，每个节点的连接数可能会随着层级的增加而增加。
+     * 但最大连接数受限于maxM的值。即每个节点在构建时可以建立的最大连接数不能超过maxM。
+     */
     private int maxM;
 
+    /**
+     * 入口点节点的最大连接数
+     * 入口点是HNSW索引的起始节点，maxM0定义了入口点节点在构建时可以建立的最大连接数。
+     * 这个值通常会与maxM有所不同，以允许更灵活的控制入口点的连接数量。
+     */
     private int maxM0;
 
+    /**
+     * 层级调整参数
+     * 在HNSW算法中，节点之间的连接构成了多个层级。levelLambda用于调整层级的数量。
+     * 较大的levelLambda值会增加层级的数量，从而提高搜索的准确性，但也会增加存储和搜索的开销。
+     */
     private double levelLambda;
 
+    /**
+     * 搜索时的探索因子
+     * 在HNSW算法中，搜索过程中需要探索邻近节点以查找更近的数据点。ef控制了搜索时访问的节点数量。
+     * 较大的ef值会增加搜索的准确性，但也会增加搜索的时间复杂度。
+     */
     private int ef;
 
+    /**
+     * 构建时的探索因子
+     * 在HNSW算法的索引构建过程中，也需要进行搜索以确定每个节点的邻近节点。
+     * efConstruction定义了在构建过程中用于搜索邻近节点的探索因子。
+     */
     private int efConstruction;
 
+    /**
+     * 是否启用删除功能的标志
+     * HNSW算法支持删除操作，即从索引中移除特定的数据点。removeEnabled标志用于控制是否启用删除功能。
+     */
     private boolean removeEnabled;
 
+    /**
+     * 当前索引中的节点数量
+     * nodeCount表示当前索引中有效节点的数量，用于跟踪索引的大小和状态。
+     */
     private int nodeCount;
 
+    /**
+     * 入口点节点
+     * 入口点是HNSW索引的起始节点，entryPoint表示当前索引中的入口点节点。
+     */
     private volatile Node<TItem> entryPoint;
 
+    /**
+     * 节点数组
+     * nodes是一个存储节点的数组，每个节点包含了数据点以及与其他节点的连接信息。
+     */
     private AtomicReferenceArray<Node<TItem>> nodes;
 
+    /**
+     * 数据点标识符到节点索引的映射
+     * lookup是一个映射结构，用于快速查找数据点标识符对应的节点索引。
+     */
     private MutableObjectIntMap<TId> lookup;
 
-    private MutableObjectLongMap<TItem> deletedItemVersions;
+    /**
+     * 已删除数据点的版本记录
+     * deletedItemVersions是一个映射结构，用于记录已删除数据点的版本信息。
+     */
+    private MutableObjectLongMap<TId> deletedItemVersions;
 
+    /**
+     * 数据点的锁映射
+     * locks是一个映射结构，用于在多线程环境中对数据点进行加锁，以确保并发访问的正确性。
+     */
     private Map<TId, Object> itemLocks;
 
+    /**
+     * 数据点标识符的序列化器
+     * itemIdSerializer用于将数据点的标识符进行序列化和反序列化操作，以便在存储和传输过程中能够进行有效的数据交换和持久化。
+     */
     private ObjectSerializer<TId> itemIdSerializer;
 
+    /**
+     * 数据点的序列化器
+     * itemSerializer用于将数据点进行序列化和反序列化操作，以便在存储和传输过程中能够进行有效的数据交换和持久化。
+     */
     private ObjectSerializer<TItem> itemSerializer;
 
+    /**
+     * 全局锁
+     * globalLock是一个可重入锁（ReentrantLock），用于保护对索引数据的并发访问。它可以在需要对整个索引进行原子操作或保护共享资源时使用。
+     */
     private ReentrantLock globalLock;
 
+    /**
+     * 已访问位集合对象池
+     * 搜索过程会使用位集合来记录已经访问过的节点，visitedBitSetPool是一个对象池，用于缓存和重用位集合对象，以提高搜索的效率。
+     */
     private GenericObjectPool<ArrayBitSet> visitedBitSetPool;
 
+    /**
+     * 排除候选集合
+     * 在搜索过程中，可以排除某些候选节点以减少搜索空间。excludedCandidates是一个位集合，用于存储要排除的候选节点。
+     */
     private ArrayBitSet excludedCandidates;
 
+    /**
+     * 精确视图
+     * exactView是HNSW索引的一部分，用于提供精确的近邻搜索功能。
+     */
     private ExactView exactView;
 
 
@@ -152,7 +242,38 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     @Override
     public boolean remove(TId id, long version) {
-        return false;
+        if (!removeEnabled) {
+            return false;
+        }
+
+        globalLock.lock();
+
+        try {
+            int internalNodeId = lookup.getIfAbsent(id, NO_NODE_ID);
+            if (internalNodeId == NO_NODE_ID) {
+                return false;
+            }
+
+            Node<TItem> node = nodes.get(internalNodeId);
+
+            if (node == null) {
+                return false;
+            }
+
+            if (node.getItem().version() > version) {
+                return false;
+            }
+
+            node.deleted = true;
+
+            lookup.remove(id);
+
+            deletedItemVersions.put(id, version);
+
+            return true;
+        } finally {
+            globalLock.unlock();
+        }
     }
 
     /**
@@ -184,19 +305,79 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
+    /**
+     * 返回索引中的所有项 该方法是线程安全的 但是它的返回值可能不是最新的
+     * 因为在返回值之后可能会有新的项被添加到索引中
+     * @return 索引中的所有项
+     */
     @Override
     public Collection<TItem> items() {
-        return null;
+        globalLock.lock();
+        try {
+            List<TItem> results = new ArrayList<>(size());
+
+            Iterator<TItem> iterator = new ItemIterator();
+
+            while (iterator.hasNext()) {
+                results.add(iterator.next());
+            }
+
+            return results;
+        } finally {
+            globalLock.unlock();
+        }
     }
 
     @Override
-    public List<SearchResultBO<TItem, TDistance>> findNearest(TVector tVector, int k) {
+    public List<SearchResultBO<TItem, TDistance>> findNearest(TVector destination, int k) {
         return null;
     }
 
     @Override
     public void save(OutputStream out) throws IOException {
 
+    }
+
+    /**
+     * 迭代器的实现 用于遍历Index中的所有项
+     */
+    class ItemIterator implements Iterator<TItem> {
+
+        /**
+         * 当前Index
+         */
+        private int index;
+
+        /**
+         * 已经完成的项数
+         */
+        private int done;
+
+        /**
+         * hasNext()方法的实现
+         * @return 是否还有下一个元素
+         */
+        @Override
+        public boolean hasNext() {
+            return done < HnswIndex.this.size();
+        }
+
+        /**
+         * next()方法的实现
+         * @return 下一个元素
+         */
+        @Override
+        public TItem next() {
+            Node<TItem> node;
+
+            do {
+                node = HnswIndex.this.nodes.get(index++);
+            } while (node == null || node.deleted);
+
+            done++;
+
+            return node.item;
+        }
     }
 
     /**
