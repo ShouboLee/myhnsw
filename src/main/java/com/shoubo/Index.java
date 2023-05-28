@@ -43,11 +43,11 @@ public interface Index<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     /**
      * 从index中删除item
      * 如果index无删除操作或具有相同id的item存在且具有较高的版本号，则返回false，并且不删除item
-     * @param item
-     * @param version
-     * @return
+     * @param id item的id
+     * @param version item的版本
+     * @return 如果item被删除，则返回true，否则返回false
      */
-    boolean remove(TItem item, long version);
+    boolean remove(TId id, long version);
 
     /**
      * 检查index是否包含item
