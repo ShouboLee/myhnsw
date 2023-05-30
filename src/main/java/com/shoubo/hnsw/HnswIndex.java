@@ -330,12 +330,158 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     @Override
     public List<SearchResultBO<TItem, TDistance>> findNearest(TVector destination, int k) {
-        return null;
+        if (entryPoint == null) {
+            return Collections.emptyList();
+        }
+
+        Node<TItem> entryPointCopy = entryPoint;
+
+        Node<TItem> curObj = entryPointCopy;
+
+        TDistance curDist = distanceType.distance(destination, curObj.getItem().vector());
+
+        for (int activeLevel = entryPointCopy.maxLevel(); activeLevel > 0; activeLevel--) {
+            boolean changed = true;
+
+            while (changed) {
+                changed = false;
+
+                synchronized (curObj) {
+                    MutableIntList candidateConnections = curObj.connections[activeLevel];
+
+                    for (int i = 0; i < candidateConnections.size(); i++) {
+
+                        int candidateId = candidateConnections.get(i);
+
+                        TDistance candidateDist = distanceType.distance(
+                                destination,
+                                nodes.get(candidateId).getItem().vector()
+                        );
+                        if (lt(candidateDist, curDist)) {
+                            curObj = nodes.get(candidateId);
+                            curDist = candidateDist;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates = searchBaseLayer(
+                curObj,
+                destination,
+                Math.max(ef, k),
+                0
+        );
+
+        while (topCandidates.size() > k) {
+            topCandidates.poll();
+        }
+
+        List<SearchResultBO<TItem, TDistance>> results = new ArrayList<>(topCandidates.size());
+        while (!topCandidates.isEmpty()) {
+            NodeIdAndDistance<TDistance> pair = topCandidates.poll();
+            results.add(0, new SearchResultBO<>(pair.distance, nodes.get(pair.nodeId).getItem(), maxValueDistanceComparator));
+        }
+
+        return results;
     }
 
     @Override
     public void save(OutputStream out) throws IOException {
 
+    }
+
+    /**
+     * // TODO
+     * @param entryPointNode
+     * @param destination
+     * @param k
+     * @param layer
+     * @return
+     */
+    private PriorityQueue<NodeIdAndDistance<TDistance>> searchBaseLayer(
+            Node<TItem> entryPointNode,
+            TVector destination,
+            int k,
+            int layer
+    ) {
+        ArrayBitSet visitedBitSet = visitedBitSetPool.borrowObject();
+
+        try {
+            PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates =
+                    new PriorityQueue<>(Comparator.<NodeIdAndDistance<TDistance>>naturalOrder().reversed());
+            PriorityQueue<NodeIdAndDistance<TDistance>> candidateSet = new PriorityQueue<>();
+
+            TDistance lowerBound;
+
+            if (!entryPointNode.deleted) {
+                TDistance distance = distanceType.distance(destination, entryPointNode.getItem().vector());
+                NodeIdAndDistance<TDistance> pair = new NodeIdAndDistance<>(entryPointNode.id, distance, maxValueDistanceComparator);
+
+                topCandidates.add(pair);
+                lowerBound = distance;
+                candidateSet.add(pair);
+            } else {
+                lowerBound = MaxValueComparator.maxValue();
+                NodeIdAndDistance<TDistance> pair = new NodeIdAndDistance<>(entryPointNode.id, lowerBound, maxValueDistanceComparator);
+                candidateSet.add(pair);
+            }
+
+            visitedBitSet.add(entryPointNode.id);
+
+            while (!candidateSet.isEmpty()) {
+                NodeIdAndDistance<TDistance> currentPair = candidateSet.poll();
+
+                if (gt(currentPair.distance, lowerBound)) {
+                    break;
+                }
+
+                Node<TItem> node = nodes.get(currentPair.nodeId);
+
+                synchronized (node) {
+
+                    MutableIntList candidates = node.connections[layer];
+
+                    for (int i = 0; i < candidates.size(); i++) {
+
+                        int candidateId = candidates.get(i);
+
+                        if (!visitedBitSet.contains(candidateId)) {
+
+                            visitedBitSet.add(candidateId);
+
+                            Node<TItem> candidateNode = nodes.get(candidateId);
+
+                            TDistance candidateDistance = distanceType.distance(destination, candidateNode.getItem().vector());
+
+                            if (topCandidates.size() < k || gt(lowerBound, candidateDistance)) {
+
+                                NodeIdAndDistance<TDistance> candidatePair = new NodeIdAndDistance<>(candidateId, candidateDistance, maxValueDistanceComparator);
+
+                                candidateSet.add(candidatePair);
+
+                                if (!candidateNode.deleted) {
+                                    topCandidates.add(candidatePair);
+                                }
+
+                                if (topCandidates.size() > k) {
+                                    topCandidates.poll();
+                                }
+
+                                if (!topCandidates.isEmpty()) {
+                                    lowerBound = topCandidates.peek().distance;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return topCandidates;
+        } finally {
+            visitedBitSet.clear();
+            visitedBitSetPool.returnObject(visitedBitSet);
+        }
     }
 
     /**
@@ -377,6 +523,48 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
             done++;
 
             return node.item;
+        }
+    }
+
+    /**
+     * 用于比较两个距离的比较器 小于
+     *
+     * @param a 距离a
+     * @param b 距离b
+     * @return a和b的比较结果
+     */
+    private boolean lt(TDistance a, TDistance b) {
+        return maxValueDistanceComparator.compare(a, b) < 0;
+    }
+
+    /**
+     * 用于比较两个距离的比较器 大于
+     *
+     * @param a 距离a
+     * @param b 距离b
+     * @return a和b的比较结果
+     */
+    private boolean gt(TDistance a, TDistance b) {
+        return maxValueDistanceComparator.compare(a, b) > 0;
+    }
+
+    static class NodeIdAndDistance<TDistance> implements Comparable<NodeIdAndDistance<TDistance>> {
+
+        final int nodeId;
+
+        final TDistance distance;
+
+        final Comparator<TDistance> distanceComparator;
+
+        NodeIdAndDistance(int nodeId, TDistance distance, Comparator<TDistance> distanceComparator) {
+            this.nodeId = nodeId;
+            this.distance = distance;
+            this.distanceComparator = distanceComparator;
+        }
+
+        @Override
+        public int compareTo(NodeIdAndDistance<TDistance> o) {
+            return distanceComparator.compare(distance, o.distance);
         }
     }
 
@@ -613,6 +801,10 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         @Override
         public int compare(TDistance o1, TDistance o2) {
             return o1 == null ? o2 == null ? 0 : 1 : o2 == null ? -1 : delegate.compare(o1, o2);
+        }
+
+        static <TDistance> TDistance maxValue() {
+            return null;
         }
     }
 
