@@ -8,6 +8,7 @@ import com.shoubo.model.bo.SearchResultBO;
 import com.shoubo.serializer.ObjectSerializer;
 import com.shoubo.utils.ArrayBitSet;
 import com.shoubo.utils.GenericObjectPool;
+import com.shoubo.utils.Murmur3;
 import lombok.Data;
 import org.eclipse.collections.api.list.primitive.MutableIntList;
 import org.eclipse.collections.api.map.primitive.MutableObjectIntMap;
@@ -15,10 +16,7 @@ import org.eclipse.collections.api.map.primitive.MutableObjectLongMap;
 import org.eclipse.collections.impl.map.mutable.primitive.ObjectIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.ObjectLongHashMap;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.io.Serializable;
+import java.io.*;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReferenceArray;
@@ -237,7 +235,11 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     @Override
     public boolean add(TItem item) {
-        return false;
+        if (item.dimensions() != dimensions) {
+            throw new IllegalArgumentException("Item没有维度: {}" + dimensions);
+        }
+
+        int randomLevel = assignLevel(item.id(), this.levelLambda);
     }
 
     @Override
@@ -328,35 +330,54 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
+    /**
+     * 在HNSW索引中查找距离给定目标向量最近的k个邻居，并返回它们的搜索结果列表。
+     * @param destination 向量
+     * @param k 数目
+     * @return 搜索结果列表
+     */
     @Override
     public List<SearchResultBO<TItem, TDistance>> findNearest(TVector destination, int k) {
+        // 检查入口点是否为空
         if (entryPoint == null) {
             return Collections.emptyList();
         }
 
+        // 创建入口点的副本
         Node<TItem> entryPointCopy = entryPoint;
 
+        // 将当前对象设置为入口点的副本
         Node<TItem> curObj = entryPointCopy;
 
+        // 计算目标向量与当前对象的初始距离
         TDistance curDist = distanceType.distance(destination, curObj.getItem().vector());
 
+        // 从最高层开始向下遍历
         for (int activeLevel = entryPointCopy.maxLevel(); activeLevel > 0; activeLevel--) {
             boolean changed = true;
 
+            // 循环知道没有距离更新
             while (changed) {
                 changed = false;
 
+                // 为当前对象加锁，确保多线程访问的安全性
                 synchronized (curObj) {
+                    // 获取当前层级的候选连接列表
                     MutableIntList candidateConnections = curObj.connections[activeLevel];
 
+                    // 遍历候选连接列表
                     for (int i = 0; i < candidateConnections.size(); i++) {
 
+                        // 获取候选连接的节点ID
                         int candidateId = candidateConnections.get(i);
 
+                        // 计算目标向量与候选连接的距离
                         TDistance candidateDist = distanceType.distance(
                                 destination,
                                 nodes.get(candidateId).getItem().vector()
                         );
+
+                        // 如果候选连接的距离小于当前距离，则更新当前距离，并改变标记
                         if (lt(candidateDist, curDist)) {
                             curObj = nodes.get(candidateId);
                             curDist = candidateDist;
@@ -367,6 +388,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
             }
         }
 
+        // 在基础层级上进行搜索，获取最近的候选对象的优先级队列
         PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates = searchBaseLayer(
                 curObj,
                 destination,
@@ -374,10 +396,12 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
                 0
         );
 
+        // 如果队列的大小超过k，则移除距离最大的元素，保持队列的大小为k
         while (topCandidates.size() > k) {
             topCandidates.poll();
         }
 
+        // 将队列中的元素转换为搜索结果列表
         List<SearchResultBO<TItem, TDistance>> results = new ArrayList<>(topCandidates.size());
         while (!topCandidates.isEmpty()) {
             NodeIdAndDistance<TDistance> pair = topCandidates.poll();
@@ -389,16 +413,18 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     @Override
     public void save(OutputStream out) throws IOException {
-
+        try (ObjectOutputStream oos = new ObjectOutputStream(out)) {
+            oos.writeObject(this);
+        }
     }
 
     /**
-     * // TODO
-     * @param entryPointNode
-     * @param destination
-     * @param k
-     * @param layer
-     * @return
+     * // 在 HNSW 索引中搜索基础层级，返回最近的候选对象的优先级队列
+     * @param entryPointNode 入口点
+     * @param destination 目标向量
+     * @param k 数目
+     * @param layer 层级
+     * @return 最近的候选对象的优先级队列
      */
     private PriorityQueue<NodeIdAndDistance<TDistance>> searchBaseLayer(
             Node<TItem> entryPointNode,
@@ -406,16 +432,20 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
             int k,
             int layer
     ) {
+        // 创建已访问过的节点的位集合对象
         ArrayBitSet visitedBitSet = visitedBitSetPool.borrowObject();
 
         try {
+            // 创建两个优先级队列，一个用于存储最近的候选对象，一个用于存储所有候选对象
             PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates =
                     new PriorityQueue<>(Comparator.<NodeIdAndDistance<TDistance>>naturalOrder().reversed());
             PriorityQueue<NodeIdAndDistance<TDistance>> candidateSet = new PriorityQueue<>();
 
             TDistance lowerBound;
 
+            // 如果入口节点未被删除
             if (!entryPointNode.deleted) {
+                // 计算目标向量与入口节点的距离，并创建一个NodeIdAndDistance对象
                 TDistance distance = distanceType.distance(destination, entryPointNode.getItem().vector());
                 NodeIdAndDistance<TDistance> pair = new NodeIdAndDistance<>(entryPointNode.id, distance, maxValueDistanceComparator);
 
@@ -423,52 +453,68 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
                 lowerBound = distance;
                 candidateSet.add(pair);
             } else {
+                // 如果入口节点已被删除，设置下界为最大值
                 lowerBound = MaxValueComparator.maxValue();
                 NodeIdAndDistance<TDistance> pair = new NodeIdAndDistance<>(entryPointNode.id, lowerBound, maxValueDistanceComparator);
                 candidateSet.add(pair);
             }
 
+            // 将入口点节点标记为已访问
             visitedBitSet.add(entryPointNode.id);
 
             while (!candidateSet.isEmpty()) {
+                // 从候选节点集合中取出距离最近的节点
                 NodeIdAndDistance<TDistance> currentPair = candidateSet.poll();
 
+                // 如果当前节点的距离大于下界，则跳出循环
                 if (gt(currentPair.distance, lowerBound)) {
                     break;
                 }
 
+                // 获取当前节点对象
                 Node<TItem> node = nodes.get(currentPair.nodeId);
 
+                // 对当前节点加锁，确保多线程访问的安全性
                 synchronized (node) {
 
+                    // 获取当前节点在指定层级的连接列表
                     MutableIntList candidates = node.connections[layer];
 
+                    // 遍历连接列表中的候选节点
                     for (int i = 0; i < candidates.size(); i++) {
 
                         int candidateId = candidates.get(i);
 
+                        // 如果候选节点未被访问过
                         if (!visitedBitSet.contains(candidateId)) {
 
+                            // 将候选节点标记为已访问
                             visitedBitSet.add(candidateId);
 
+                            // 获取候选节点对象
                             Node<TItem> candidateNode = nodes.get(candidateId);
 
+                            // 计算目标向量与候选节点的距离
                             TDistance candidateDistance = distanceType.distance(destination, candidateNode.getItem().vector());
 
+                            // 如果最近邻候选集的大小小于k或者候选节点的距离小于下界
                             if (topCandidates.size() < k || gt(lowerBound, candidateDistance)) {
 
+                                // 创建一个NodeIdAndDistance对象，并将其添加到候选集合中
                                 NodeIdAndDistance<TDistance> candidatePair = new NodeIdAndDistance<>(candidateId, candidateDistance, maxValueDistanceComparator);
-
                                 candidateSet.add(candidatePair);
 
+                                // 如果候选节点未被删除，则将其添加到最近邻候选集中
                                 if (!candidateNode.deleted) {
                                     topCandidates.add(candidatePair);
                                 }
 
+                                // 如果最近邻候选集的大小大于k，则移除距离最大的元素，保持队列的大小为k
                                 if (topCandidates.size() > k) {
                                     topCandidates.poll();
                                 }
 
+                                // 如果最近邻候选集非空，更新下界为最近邻候选集中距离最小的节点的距离
                                 if (!topCandidates.isEmpty()) {
                                     lowerBound = topCandidates.peek().distance;
                                 }
@@ -479,6 +525,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
             }
             return topCandidates;
         } finally {
+            // 清空已访问过的节点的位集合对象，并将其返回到对象池中
             visitedBitSet.clear();
             visitedBitSetPool.returnObject(visitedBitSet);
         }
@@ -524,6 +571,29 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
             return node.item;
         }
+    }
+
+    /**
+     * 根据给定的值和参数 lambda 分配一个层级值。用于在 HNSW 索引结构中确定节点的连接和搜索路径。
+     * @param value 要分配层级的值
+     * @param lambda 控制层级分配的参数
+     * @return 分配的层级值
+     */
+    private int assignLevel(TId value, double lambda) {
+        // 计算值的哈希码
+        int hashCode = value.hashCode();
+
+        byte[] bytes = {
+                (byte) (hashCode >>> 24), // 取哈希码的高8位字节
+                (byte) (hashCode >>> 16), // 取哈希码的次高8位字节
+                (byte) (hashCode >>> 8), // 取哈希码的次低8位字节
+                (byte) hashCode // 取哈希码的低8位字节
+        };
+        // // 使用 Murmur3 哈希函数生成随机数
+        double random = Math.abs((double) Murmur3.hash32(bytes) / Integer.MAX_VALUE);
+
+        // // 根据随机数的对数值乘以 lambda，得到层级值
+        return (int) (-Math.log(random) * lambda);
     }
 
     /**
