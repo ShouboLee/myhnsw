@@ -2,6 +2,7 @@ package com.shoubo.hnsw;
 
 import com.shoubo.Index;
 import com.shoubo.Item;
+import com.shoubo.exception.SizeLimitExceededException;
 import com.shoubo.listener.ProgressListener;
 import com.shoubo.model.DistanceType;
 import com.shoubo.model.bo.SearchResultBO;
@@ -13,6 +14,7 @@ import lombok.Data;
 import org.eclipse.collections.api.list.primitive.MutableIntList;
 import org.eclipse.collections.api.map.primitive.MutableObjectIntMap;
 import org.eclipse.collections.api.map.primitive.MutableObjectLongMap;
+import org.eclipse.collections.impl.list.mutable.primitive.IntArrayList;
 import org.eclipse.collections.impl.map.mutable.primitive.ObjectIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.ObjectLongHashMap;
 
@@ -240,6 +242,248 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
 
         int randomLevel = assignLevel(item.id(), this.levelLambda);
+
+        IntArrayList[] connections = new IntArrayList[randomLevel + 1];
+
+        for (int level = 0; level <= randomLevel; level++) {
+            int levelM = randomLevel == 0 ? maxM0 : maxM;
+            connections[level] = new IntArrayList(levelM);
+        }
+
+        globalLock.lock();
+
+        try {
+            int existingNodeId = lookup.getIfAbsent(item.id(), NO_NODE_ID);
+
+            if (existingNodeId != NO_NODE_ID) {
+                if (!removeEnabled) {
+                    return false;
+                }
+
+                Node<TItem> node = nodes.get(existingNodeId);
+
+                if (item.version() < node.getItem().version()) {
+                    return false;
+                }
+
+                if (Objects.deepEquals(node.getItem().vector(), item.vector())) {
+                    node.item = item;
+                    return true;
+                } else {
+                    remove(item.id(), item.version());
+                }
+            } else if (item.version() < deletedItemVersions.getIfAbsent(item.id(), -1)) {
+                return false;
+            }
+
+            if (nodeCount >= this.maxItemCount) {
+                throw new SizeLimitExceededException("索引中的项数: " + nodeCount + ", 超过了最大限制: " + maxItemCount);
+            }
+
+            int newNodeId = nodeCount++;
+
+            synchronized (excludedCandidates) {
+                excludedCandidates.add(newNodeId);
+            }
+
+            Node<TItem> newNode = new Node<>(newNodeId, connections, item, false);
+
+            nodes.set(newNodeId, newNode);
+            lookup.put(item.id(), newNodeId);
+            deletedItemVersions.remove(item.id());
+
+            Object lock = itemLocks.computeIfAbsent(item.id(), k -> new Object());
+
+            Node<TItem> entryPointCopy = entryPoint;
+
+            try {
+                synchronized (lock) {
+                    synchronized (newNode) {
+
+                        if (entryPoint != null && randomLevel <= entryPoint.maxLevel()) {
+                            globalLock.unlock();
+                        }
+
+                        Node<TItem> currObj = entryPointCopy;
+
+                        if (currObj != null) {
+                            if (newNode.maxLevel() < entryPointCopy.maxLevel()) {
+                                TDistance curDist = distanceType.distance(item.vector(), currObj.item.vector());
+
+                                for (int activeLevel = entryPointCopy.maxLevel(); activeLevel > newNode.maxLevel(); activeLevel--) {
+
+                                    boolean changed = true;
+
+                                    while (changed) {
+                                        changed = false;
+
+                                        synchronized (currObj) {
+                                            MutableIntList candidateConnections = currObj.connections[activeLevel];
+
+                                            for (int i = 0; i < candidateConnections.size(); i++) {
+
+                                                int candidateId = candidateConnections.get(i);
+
+                                                Node<TItem> candidateNode = nodes.get(candidateId);
+
+                                                TDistance candidateDistance = distanceType.distance(
+                                                        item.vector(),
+                                                        candidateNode.item.vector()
+                                                );
+
+                                                if (lt(candidateDistance, curDist)) {
+                                                    curDist = candidateDistance;
+                                                    currObj = candidateNode;
+                                                    changed = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            for (int level = Math.min(randomLevel, entryPointCopy.maxLevel()); level >= 0; level--) {
+                                PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates = searchBaseLayer(currObj, item.vector(), efConstruction, level);
+
+                                if (entryPointCopy.deleted) {
+                                    TDistance distance = distanceType.distance(item.vector(), entryPointCopy.getItem().vector());
+                                    topCandidates.add(new NodeIdAndDistance<>(entryPointCopy.id, distance, maxValueDistanceComparator));
+
+                                    if (topCandidates.size() > efConstruction) {
+                                        topCandidates.poll();
+                                    }
+                                }
+
+                                mutuallyConnectNewElement(newNode, topCandidates, level);
+                            }
+                        }
+
+                        // zoom out to the highest level
+                        if (entryPoint == null || newNode.maxLevel() > entryPointCopy.maxLevel()) {
+                            // 这是线程安全的，因为在添加level时获得了全局锁
+                            this.entryPoint = newNode;
+                        }
+                        return true;
+                    }
+                }
+            } finally {
+                synchronized (excludedCandidates) {
+                    excludedCandidates.remove(newNodeId);
+                }
+            }
+        } finally {
+            if (globalLock.isHeldByCurrentThread()) {
+                globalLock.unlock();
+            }
+        }
+    }
+
+    private void mutuallyConnectNewElement(Node<TItem> newNode,
+                                           PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates,
+                                           int level) {
+        int bestN = level == 0 ? this.maxM0 : this.maxM;
+
+        int newNodeId = newNode.id;
+        TVector newItemVector = newNode.getItem().vector();
+        MutableIntList newItemConnections = newNode.connections[level];
+
+        getNeighborsByHeuristic2(topCandidates, m);
+
+        while (!topCandidates.isEmpty()) {
+            int selectedNeighbourId = topCandidates.poll().nodeId;
+
+            synchronized (excludedCandidates) {
+                if (excludedCandidates.contains(selectedNeighbourId)) {
+                    continue;
+                }
+            }
+
+            newItemConnections.add(selectedNeighbourId);
+
+            Node<TItem> neighbourNode = nodes.get(selectedNeighbourId);
+
+            synchronized (neighbourNode) {
+                TVector neighbourVector = neighbourNode.getItem().vector();
+
+                MutableIntList neighbourConnectionsAtLevel = neighbourNode.connections[level];
+
+                if (neighbourConnectionsAtLevel.size() < bestN) {
+                    neighbourConnectionsAtLevel.add(newNodeId);
+                } else {
+                    // 找到被新的元素替换的“最弱的”元素
+                    TDistance dMax = distanceType.distance(
+                            newItemVector,
+                            neighbourNode.getItem().vector()
+                    );
+
+                    Comparator<NodeIdAndDistance<TDistance>> comparator = Comparator.<NodeIdAndDistance<TDistance>>naturalOrder().reversed();
+
+                    PriorityQueue<NodeIdAndDistance<TDistance>> candidates = new PriorityQueue<>(comparator);
+                    candidates.add(new NodeIdAndDistance<>(newNodeId, dMax, maxValueDistanceComparator));
+
+                    neighbourConnectionsAtLevel.forEach(id -> {
+                        TDistance dist = distanceType.distance(
+                                neighbourVector,
+                                nodes.get(id).getItem().vector()
+                        );
+
+                        candidates.add(new NodeIdAndDistance<>(id, dist, maxValueDistanceComparator));
+                    });
+
+                    getNeighborsByHeuristic2(candidates, bestN);
+
+                    neighbourConnectionsAtLevel.clear();
+
+                    while (!candidates.isEmpty()) {
+                        neighbourConnectionsAtLevel.add(candidates.poll().nodeId);
+                    }
+                }
+            }
+        }
+    }
+
+    private void getNeighborsByHeuristic2(PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates, int m) {
+
+        if (topCandidates.size() < m) {
+            return;
+        }
+
+        PriorityQueue<NodeIdAndDistance<TDistance>> queueClosest = new PriorityQueue<>();
+        List<NodeIdAndDistance<TDistance>> returnList = new ArrayList<>();
+
+        while (!topCandidates.isEmpty()) {
+            queueClosest.add(topCandidates.poll());
+        }
+
+        while (!queueClosest.isEmpty()) {
+            if (returnList.size() >= m) {
+                break;
+            }
+
+            NodeIdAndDistance<TDistance> currentPair = queueClosest.poll();
+
+            TDistance distToQuery = currentPair.distance;
+
+            boolean good = true;
+
+            for (NodeIdAndDistance<TDistance> secondPair : returnList) {
+
+                TDistance curDist = distanceType.distance(
+                        nodes.get(secondPair.nodeId).getItem().vector(),
+                        nodes.get(currentPair.nodeId).getItem().vector()
+                );
+
+                if (lt(curDist, distToQuery)) {
+                    good = false;
+                    break;
+                }
+            }
+            if (good) {
+                returnList.add(currentPair);
+            }
+        }
+
+        topCandidates.addAll(returnList);
     }
 
     @Override
@@ -831,6 +1075,13 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
          * 节点是否被删除
          */
         volatile boolean deleted;
+
+        Node(int id, MutableIntList[] connections, TItem item, boolean deleted) {
+            this.id = id;
+            this.connections = connections;
+            this.item = item;
+            this.deleted = deleted;
+        }
 
         /**
          * 节点的最大层级
