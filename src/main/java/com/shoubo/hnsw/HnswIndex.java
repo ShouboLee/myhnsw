@@ -537,6 +537,10 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
+    /** 获取item
+     * @param id item的id
+     * @return item
+     */
     @Override
     public Optional<TItem> get(TId id) {
         globalLock.lock();
@@ -776,6 +780,31 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     }
 
     /**
+     * resize新的大小 重新分配内存
+     * @param newSize 新的大小
+     */
+    public void resize(int newSize) {
+        globalLock.lock();
+        try {
+            this.maxItemCount = newSize;
+
+            this.visitedBitSetPool = new GenericObjectPool<>(() -> new ArrayBitSet(this.maxItemCount),
+                    Runtime.getRuntime().availableProcessors());
+
+            AtomicReferenceArray<Node<TItem>> newNodes = new AtomicReferenceArray<>(newSize);
+
+            for (int i = 0; i < this.nodes.length(); i++) {
+                newNodes.set(i, this.nodes.get(i));
+            }
+            this.nodes = newNodes;
+
+            this.excludedCandidates = new ArrayBitSet(this.excludedCandidates, newSize);
+        } finally {
+            globalLock.unlock();
+        }
+    }
+
+    /**
      * 迭代器的实现 用于遍历Index中的所有项
      */
     class ItemIterator implements Iterator<TItem> {
@@ -922,10 +951,6 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
             return HnswIndex.this.size();
         }
 
-        /** 获取item
-         * @param id item的id
-         * @return item
-         */
         @Override
         public Optional<TItem> get(TId id) {
             return HnswIndex.this.get(id);
