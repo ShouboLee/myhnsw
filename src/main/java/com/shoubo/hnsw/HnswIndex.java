@@ -14,6 +14,8 @@ import lombok.Data;
 import org.eclipse.collections.api.list.primitive.MutableIntList;
 import org.eclipse.collections.api.map.primitive.MutableObjectIntMap;
 import org.eclipse.collections.api.map.primitive.MutableObjectLongMap;
+import org.eclipse.collections.api.tuple.primitive.ObjectIntPair;
+import org.eclipse.collections.api.tuple.primitive.ObjectLongPair;
 import org.eclipse.collections.impl.list.mutable.primitive.IntArrayList;
 import org.eclipse.collections.impl.map.mutable.primitive.ObjectIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.ObjectLongHashMap;
@@ -778,6 +780,327 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
             visitedBitSetPool.returnObject(visitedBitSet);
         }
     }
+
+    /**
+     * 创建一个只读的视图，包含距离搜索时成对比较的前k个最近邻居。
+     * 可以用作评测搜索精确度的基准
+     * 该方法将比较慢，但是每次都能给出正确的结果
+     *
+     * @return 一个只读的视图
+     */
+    public Index<TId, TVector, TItem, TDistance> asExactIndex() {
+        return exactView;
+    }
+
+    /**
+     * 返回存在当前Index下的items的维度
+     * @return 维度
+     */
+    public int getDimensions() {
+        return dimensions;
+    }
+
+    /**
+     * 返回新的节点加入时的双向连接数量
+     *
+     * @return 双向连接数量
+     */
+    public int getM() {
+        return m;
+    }
+
+    /**
+     * 返回搜索期间，最近邻节点的动态列表的大小
+     * @return 最近邻节点的动态列表的大小
+     */
+    public int getEf() {
+        return ef;
+    }
+
+    /**
+     * 设置搜索期间，最近邻节点的动态列表的大小
+     * @param ef 最近邻节点的动态列表的大小
+     */
+    public void setEf(int ef) {
+        this.ef = ef;
+    }
+
+    /**
+     * 返回相同含义的{@link #getEf()}ef，但是控制 index时间/index精度
+     * @return
+     */
+    public int getEfConstruction() {
+        return efConstruction;
+    }
+
+    /**
+     * 返回距离函数的类型
+     * @return 距离函数的类型
+     */
+    public DistanceType<TVector, TDistance> getDistanceType() {
+        return distanceType;
+    }
+
+    /**
+     * 返回距离比较器
+     * @return 距离比较器
+     */
+    public Comparator<TDistance> getDistanceComparator() {
+        return distanceComparator;
+    }
+
+    /**
+     * 返回删除是否可用
+     * @return 删除是否可用
+     */
+    public boolean isRemoveEnabled() {
+        return removeEnabled;
+    }
+
+    /**
+     * 返回当前Index可以保持的最大节点的数量
+     * @return 最大节点的数量
+     */
+    public int getMaxItemCount() {
+        return maxItemCount;
+    }
+
+    /**
+     * 返回当保存Index时，用于序列化Item的id的序列化器
+     * @return 序列化器
+     */
+    public ObjectSerializer<TId> getItemIdSerializer() {
+        return itemIdSerializer;
+    }
+
+    /**
+     * 返回当保存Index时，用于序列化Item的vector的序列化器
+     * @return 序列化器
+     */
+    public ObjectSerializer<TItem> getItemSerializer() {
+        return itemSerializer;
+    }
+
+    private void writeObject(ObjectOutputStream objectOutputStream) throws IOException {
+        objectOutputStream.writeByte(VERSION_1);
+        objectOutputStream.writeInt(dimensions);
+        objectOutputStream.writeObject(distanceType);
+        objectOutputStream.writeObject(distanceComparator);
+        objectOutputStream.writeObject(itemIdSerializer);
+        objectOutputStream.writeObject(itemSerializer);
+        objectOutputStream.writeInt(maxItemCount);
+        objectOutputStream.writeInt(m);
+        objectOutputStream.writeInt(maxM);
+        objectOutputStream.writeInt(maxM0);
+        objectOutputStream.writeDouble(levelLambda);
+        objectOutputStream.writeInt(ef);
+        objectOutputStream.writeInt(efConstruction);
+        objectOutputStream.writeBoolean(removeEnabled);
+        objectOutputStream.writeInt(nodeCount);
+        writeMutableObjectIntMap(objectOutputStream, lookup);
+        writeMutableObjectLongMap(objectOutputStream, deletedItemVersions);
+        writeNodesArray(objectOutputStream, nodes);
+        objectOutputStream.writeInt(entryPoint == null ? -1 : entryPoint.id);
+
+    }
+
+    @SuppressWarnings("unchecked")
+    private void readObject(ObjectInputStream objectInputStream) throws IOException, ClassNotFoundException {
+        @SuppressWarnings("unused") byte version = objectInputStream.readByte(); // 用于应对未来不兼容的序列化版本
+        this.dimensions = objectInputStream.readInt();
+        this.distanceType = (DistanceType<TVector, TDistance>) objectInputStream.readObject();
+        this.distanceComparator = (Comparator<TDistance>) objectInputStream.readObject();
+        this.maxValueDistanceComparator = new MaxValueComparator<>(distanceComparator);
+        this.itemIdSerializer = (ObjectSerializer<TId>) objectInputStream.readObject();
+        this.itemSerializer = (ObjectSerializer<TItem>) objectInputStream.readObject();
+
+        this.maxItemCount = objectInputStream.readInt();
+        this.m = objectInputStream.readInt();
+        this.maxM = objectInputStream.readInt();
+        this.maxM0 = objectInputStream.readInt();
+        this.levelLambda = objectInputStream.readDouble();
+        this.ef = objectInputStream.readInt();
+        this.efConstruction = objectInputStream.readInt();
+        this.removeEnabled = objectInputStream.readBoolean();
+        this.nodeCount = objectInputStream.readInt();
+        this.lookup = readMutableObjectIntMap(objectInputStream, itemIdSerializer);
+        this.deletedItemVersions = readMutableObjectLongMap(objectInputStream, itemIdSerializer);
+        this.nodes = readNodesArray(objectInputStream, itemSerializer, maxM0, maxM);
+
+        int entryPointNodeId = objectInputStream.readInt();
+        this.entryPoint = entryPointNodeId == -1 ? null : nodes.get(entryPointNodeId); // TODO
+
+        this.globalLock = new ReentrantLock();
+        this.visitedBitSetPool = new GenericObjectPool<>(() -> new ArrayBitSet(this.maxItemCount),
+                Runtime.getRuntime().availableProcessors());
+        this.excludedCandidates = new ArrayBitSet(this.maxItemCount);
+        this.itemLocks = new HashMap<>();
+        this.exactView = new ExactView();
+    }
+
+    /**
+     * // TODO
+     * @param objectOutputStream
+     * @param map
+     * @throws IOException
+     */
+    private void writeMutableObjectIntMap(ObjectOutputStream objectOutputStream, MutableObjectIntMap<TId> map) throws IOException {
+        objectOutputStream.writeInt(map.size());
+
+        for (ObjectIntPair<TId> pair : map.keyValuesView()) {
+            itemIdSerializer.write(pair.getOne(), objectOutputStream);
+            objectOutputStream.writeInt(pair.getTwo());
+        }
+    }
+
+    /**
+     * // TODO
+     * @param objectOutputStream
+     * @param map
+     * @throws IOException
+     */
+    private void writeMutableObjectLongMap(ObjectOutputStream objectOutputStream, MutableObjectLongMap<TId> map) throws IOException {
+        objectOutputStream.writeInt(map.size());
+
+        for (ObjectLongPair<TId> pair : map.keyValuesView()) {
+            itemIdSerializer.write(pair.getOne(), objectOutputStream);
+            objectOutputStream.writeLong(pair.getTwo());
+        }
+    }
+
+    /**
+     * // TODO
+     * @param objectOutputStream
+     * @param nodes
+     * @throws IOException
+     */
+    private void writeNodesArray(ObjectOutputStream objectOutputStream, AtomicReferenceArray<Node<TItem>> nodes)
+        throws IOException {
+        objectOutputStream.writeInt(nodes.length());
+
+        for (int i = 0; i < nodes.length(); i++) {
+            writeNode(objectOutputStream, nodes.get(i));
+        }
+    }
+
+    /**
+     * // TODO
+     * @param objectOutputStream
+     * @param node
+     * @throws IOException
+     */
+    private void writeNode(ObjectOutputStream objectOutputStream, Node<TItem> node) throws IOException {
+        if (node == null) {
+            objectOutputStream.writeInt(-1);
+        } else {
+            objectOutputStream.writeInt(node.id);
+            objectOutputStream.writeInt(node.connections.length);
+
+            for (MutableIntList connection : node.connections) {
+                objectOutputStream.writeInt(connection.size());
+
+                for (int i = 0; i < connection.size(); i++) {
+                    objectOutputStream.writeInt(connection.get(i));
+
+                    for (int j = 0; j < connection.size(); j++) {
+                        objectOutputStream.writeInt(connection.get(j));
+                    }
+                }
+                itemSerializer.write(node.item, objectOutputStream);
+                objectOutputStream.writeBoolean(node.deleted);
+            }
+        }
+    }
+
+    private static IntArrayList readIntArrayList(ObjectInputStream ois, int initialSize) throws IOException {
+        int size = ois.readInt();
+
+        IntArrayList list = new IntArrayList(initialSize);
+
+        for (int j = 0; j < size; j++) {
+            list.add(ois.readInt());
+        }
+
+        return list;
+    }
+
+    private static <TItem> Node<TItem> readNode(ObjectInputStream ois,
+                                                ObjectSerializer<TItem> itemSerializer,
+                                                int maxM0,
+                                                int maxM) throws IOException, ClassNotFoundException {
+
+        int id = ois.readInt();
+
+        if (id == -1) {
+            return null;
+        } else {
+            int connectionsSize = ois.readInt();
+
+            MutableIntList[] connections = new MutableIntList[connectionsSize];
+
+            for (int i = 0; i < connectionsSize; i++) {
+                int levelM = i == 0 ? maxM0 : maxM;
+                connections[i] = readIntArrayList(ois, levelM);
+            }
+
+            TItem item = itemSerializer.read(ois);
+
+            boolean deleted = ois.readBoolean();
+
+            return new Node<>(id, connections, item, deleted);
+        }
+    }
+
+    private static <TItem> AtomicReferenceArray<Node<TItem>> readNodesArray(ObjectInputStream ois,
+                                                                            ObjectSerializer<TItem> itemSerializer,
+                                                                            int maxM0,
+                                                                            int maxM)
+            throws IOException, ClassNotFoundException {
+
+        int size = ois.readInt();
+        AtomicReferenceArray<Node<TItem>> nodes = new AtomicReferenceArray<>(size);
+
+        for (int i = 0; i < nodes.length(); i++) {
+            nodes.set(i, readNode(ois, itemSerializer, maxM0, maxM));
+        }
+
+        return nodes;
+    }
+
+    private static <TId> MutableObjectIntMap<TId> readMutableObjectIntMap(ObjectInputStream ois,
+                                                                          ObjectSerializer<TId> itemIdSerializer)
+            throws IOException, ClassNotFoundException {
+
+        int size = ois.readInt();
+
+        MutableObjectIntMap<TId> map = new ObjectIntHashMap<>(size);
+
+        for (int i = 0; i < size; i++) {
+            TId key = itemIdSerializer.read(ois);
+            int value = ois.readInt();
+
+            map.put(key, value);
+        }
+        return map;
+    }
+
+    private static <TId> MutableObjectLongMap<TId> readMutableObjectLongMap(ObjectInputStream ois,
+                                                                            ObjectSerializer<TId> itemIdSerializer)
+            throws IOException, ClassNotFoundException {
+
+        int size = ois.readInt();
+
+        MutableObjectLongMap<TId> map = new ObjectLongHashMap<>(size);
+
+        for (int i = 0; i < size; i++) {
+            TId key = itemIdSerializer.read(ois);
+            long value = ois.readLong();
+
+            map.put(key, value);
+        }
+        return map;
+    }
+
 
     /**
      * resize新的大小 重新分配内存
