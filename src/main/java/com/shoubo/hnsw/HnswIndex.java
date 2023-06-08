@@ -8,6 +8,7 @@ import com.shoubo.model.DistanceType;
 import com.shoubo.model.bo.SearchResultBO;
 import com.shoubo.serializer.ObjectSerializer;
 import com.shoubo.utils.ArrayBitSet;
+import com.shoubo.utils.ClassLoaderObjectInputStream;
 import com.shoubo.utils.GenericObjectPool;
 import com.shoubo.utils.Murmur3;
 import lombok.Data;
@@ -21,6 +22,7 @@ import org.eclipse.collections.impl.map.mutable.primitive.ObjectIntHashMap;
 import org.eclipse.collections.impl.map.mutable.primitive.ObjectLongHashMap;
 
 import java.io.*;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReferenceArray;
@@ -1012,6 +1014,106 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
+    /**
+     * 从文件中载入索引 HnswIndex
+     * @param file 文件 File
+     * @return 索引 HnswIndex
+     * @param <TId> id 类型
+     * @param <TVector> 向量类型
+     * @param <TItem> item 类型
+     * @param <TDistance> 距离类型
+     * @throws IOException IO 异常
+     */
+    public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(File file)
+        throws IOException {
+        return load(new FileInputStream(file));
+    }
+
+    /**
+     * 从文件中载入索引 HnswIndex
+     * @param file 文件 File
+     * @param classLoader 类加载器 ClassLoader
+     * @return 索引 HnswIndex
+     * @param <TId> id 类型
+     * @param <TVector> 向量类型
+     * @param <TItem> item 类型
+     * @param <TDistance> 距离类型
+     * @throws IOException IO 异常
+     */
+    public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(File file, ClassLoader classLoader)
+        throws IOException {
+        return load(new FileInputStream(file), classLoader);
+    }
+
+    /**
+     * 从路径中载入索引 HnswIndex
+     * @param path 路径 Path
+     * @return 索引 HnswIndex
+     * @param <TId> id 类型
+     * @param <TVector> 向量类型
+     * @param <TItem> item 类型
+     * @param <TDistance> 距离类型
+     * @throws IOException IO 异常
+     */
+    public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(Path path)
+            throws IOException {
+        return load(Files.newInputStream(path));
+    }
+
+    /**
+     * 从路径中载入索引 HnswIndex
+     * @param path 路径 Path
+     * @param classLoader 类加载器 ClassLoader
+     * @return 索引 HnswIndex
+     * @param <TId> id 类型
+     * @param <TVector> 向量类型
+     * @param <TItem> item 类型
+     * @param <TDistance> 距离类型
+     * @throws IOException IO 异常
+     */
+    public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(Path path, ClassLoader classLoader)
+            throws IOException {
+        return load(Files.newInputStream(path), classLoader);
+    }
+
+    /**
+     * 从输入流中载入索引 HnswIndex
+     * @param inputStream 输入流
+     * @return 索引 HnswIndex
+     * @param <TId> id 类型
+     * @param <TVector> 向量类型
+     * @param <TItem> item 类型
+     * @param <TDistance> 距离类型
+     * @throws IOException IO 异常
+     * @throws IllegalArgumentException 找不到用于载入的文件
+     */
+    public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(InputStream inputStream)
+            throws IOException {
+        return load(inputStream, Thread.currentThread().getContextClassLoader());
+    }
+
+    /**
+     * 从输入流中载入索引 HnswIndex
+     * @param inputStream 输入流
+     * @param classLoader 类加载器
+     * @return 索引 HnswIndex
+     * @param <TId> id 类型
+     * @param <TVector> 向量类型
+     * @param <TItem> item 类型
+     * @param <TDistance> 距离类型
+     * @throws IOException IO 异常
+     * @throws IllegalArgumentException 找不到用于载入的文件
+     */
+    @SuppressWarnings("unchecked")
+    public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(InputStream inputStream, ClassLoader classLoader)
+            throws IOException {
+        try(ObjectInputStream ois = new ClassLoaderObjectInputStream(classLoader, inputStream)) {
+            return (HnswIndex<TId, TVector, TItem, TDistance>) ois.readObject();
+        } catch (ClassNotFoundException e) {
+            throw new IllegalArgumentException("找不到用于载入的文件", e);
+        }
+    }
+
     private static IntArrayList readIntArrayList(ObjectInputStream ois, int initialSize) throws IOException {
         int size = ois.readInt();
 
@@ -1101,6 +1203,43 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         return map;
     }
 
+    /**
+     * 由新建一个HNSW index开始程序
+     * @param dimensions 向量维度
+     * @param distanceType 距离函数
+     * @param maxItemCount 最大item数量
+     * @return Builder
+     * @param <TVector> 向量类型
+     * @param <TDistance> 距离类型
+     */
+    public static <TVector, TDistance extends Comparable<TDistance>> Builder<TVector, TDistance> newBuilder(
+            int dimensions,
+            DistanceType<TVector, TDistance> distanceType,
+            int maxItemCount) {
+
+        Comparator<TDistance> distanceComparator = Comparator.naturalOrder();
+
+        return new Builder<>(dimensions, distanceType, distanceComparator, maxItemCount);
+    }
+
+    /**
+     * 由新建一个HNSW index开始程序
+     * @param dimensions 向量维度
+     * @param distanceType 距离函数
+     * @param distanceComparator 距离比较器
+     * @param maxItemCount 最大item数量
+     * @return Builder
+     * @param <TVector> 向量类型
+     * @param <TDistance> 距离类型
+     */
+    public static <TVector, TDistance> Builder<TVector, TDistance> newBuilder(
+            int dimensions,
+            DistanceType<TVector, TDistance> distanceType,
+            Comparator<TDistance> distanceComparator,
+            int maxItemCount) {
+
+        return new Builder<>(dimensions, distanceType, distanceComparator, maxItemCount);
+    }
 
     /**
      * resize新的大小 重新分配内存
