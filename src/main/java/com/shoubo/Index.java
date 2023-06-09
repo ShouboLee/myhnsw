@@ -101,7 +101,7 @@ public interface Index<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         try {
             // 创建一个 LinkedBlockingQueue，将传入的项集合作为初始队列，每个线程从队列中获取项进行添加操作
-            LinkedBlockingQueue<TItem> itemsQueue = new LinkedBlockingQueue<>(items);
+            Queue<TItem> itemsQueue = new LinkedBlockingQueue<>(items);
             // 保存提交给线程池的任务的返回结果
             List<Future<?>> futures = new ArrayList<>();
 

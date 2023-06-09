@@ -2,6 +2,9 @@
 *.log
 *.lock
 
+# test
+src/test/
+
 # Package Files #
 *.jar
 *.war

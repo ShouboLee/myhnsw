@@ -20,7 +20,7 @@ public class NamedThreadFactory implements ThreadFactory {
 
     @Override
     public Thread newThread(Runnable r) {
-        return new Thread(r, String.format(namingPattern, counter, counter.incrementAndGet()));
+        return new Thread(r, String.format(namingPattern, counter.incrementAndGet()));
     }
 
 }

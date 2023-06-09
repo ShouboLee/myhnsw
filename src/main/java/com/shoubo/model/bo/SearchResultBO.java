@@ -1,12 +1,12 @@
 package com.shoubo.model.bo;
 
 import lombok.AllArgsConstructor;
+import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.ToString;
 
 import java.io.Serializable;
 import java.util.Comparator;
-import java.util.Objects;
 
 /**
  * @author shoubo
@@ -16,6 +16,7 @@ import java.util.Objects;
 @AllArgsConstructor
 @Getter
 @ToString
+@EqualsAndHashCode
 public class SearchResultBO<TItem, TDistance>
         implements Comparable<SearchResultBO<TItem, TDistance>>, Serializable {
     private static final long serialVersionUID = 1L;
@@ -38,19 +39,6 @@ public class SearchResultBO<TItem, TDistance>
     @Override
     public int compareTo(SearchResultBO<TItem, TDistance> o) {
         return distanceComparator.compare(distance, o.distance);
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o)  return true;
-        if (null == o || getClass() != o.getClass())    return false;
-        SearchResultBO<?,?> that = (SearchResultBO<?, ?>) o;
-        return Objects.equals(distance, that.distance) && Objects.equals(item, that.item);
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hash(distance, item);
     }
 
     /**
