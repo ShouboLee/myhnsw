@@ -33,12 +33,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * Date: 2023/5/27
  * Desc: HnswIndex 这里包含了HNSW算法的主要具体实现
  *
- * @param <TId> Item的唯一标识符的类型
- * @param <TVector> Vector的类型
- * @param <TItem> Item的类型
+ * @param <TId>       Item的唯一标识符的类型
+ * @param <TVector>   Vector的类型
+ * @param <TItem>     Item的类型
  * @param <TDistance> 距离的类型
  * @论文链接 <a href="https://arxiv.org/abs/1603.09320">
- *  * Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs</a>
+ * * Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs</a>
  */
 public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance>
         implements Index<TId, TVector, TItem, TDistance> {
@@ -239,14 +239,23 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         this.exactView = new ExactView();
     }
 
+    /**
+     * 向索引中添加一个新的数据点
+     *
+     * @param item 要添加的数据点
+     * @return 如果成功添加，则返回true；如果数据点已存在，则返回false
+     */
     @Override
     public boolean add(TItem item) {
+        // 检查数据点的维度是否正确
         if (item.dimensions() != dimensions) {
             throw new IllegalArgumentException("Item没有维度: {}" + dimensions);
         }
 
+        // 为新节点分配随机层级
         int randomLevel = assignLevel(item.id(), this.levelLambda);
 
+        // 为每个层级创建一个连接列表
         IntArrayList[] connections = new IntArrayList[randomLevel + 1];
 
         for (int level = 0; level <= randomLevel; level++) {
@@ -254,12 +263,15 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
             connections[level] = new IntArrayList(levelM);
         }
 
+        // 获取全局锁
         globalLock.lock();
 
         try {
+            // 检查数据点是否已存在于索引中
             int existingNodeId = lookup.getIfAbsent(item.id(), NO_NODE_ID);
 
             if (existingNodeId != NO_NODE_ID) {
+                // 如果数据点已存在，则根据removeEnabled标志决定是否更新数据点
                 if (!removeEnabled) {
                     return false;
                 }
@@ -280,34 +292,48 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
                 return false;
             }
 
+            // 检查索引是否已满
             if (nodeCount >= this.maxItemCount) {
                 throw new SizeLimitExceededException("索引中的项数: " + nodeCount + ", 超过了最大限制: " + maxItemCount);
             }
 
+            // 为新节点分配一个唯一的节点ID
             int newNodeId = nodeCount++;
 
+            // 将新节点添加到排除候选集合中
             synchronized (excludedCandidates) {
                 excludedCandidates.add(newNodeId);
             }
 
+            // 创建新节点
             Node<TItem> newNode = new Node<>(newNodeId, connections, item, false);
 
+            // 将新节点添加到节点数组中
             nodes.set(newNodeId, newNode);
+
+            // 将数据点标识符与节点ID建立映射关系
             lookup.put(item.id(), newNodeId);
+
+            // 从已删除数据点的版本记录中删除该数据点
             deletedItemVersions.remove(item.id());
 
+            // 获取数据点的锁
             Object lock = itemLocks.computeIfAbsent(item.id(), k -> new Object());
 
+            // 获取入口点节点的副本
             Node<TItem> entryPointCopy = entryPoint;
 
             try {
+                // 获取数据点锁和新节点锁
                 synchronized (lock) {
                     synchronized (newNode) {
 
+                        // 如果入口点节点存在且新节点的层级小于等于入口点节点的最大层级，则释放全局锁
                         if (entryPoint != null && randomLevel <= entryPoint.maxLevel()) {
                             globalLock.unlock();
                         }
 
+                        // 从入口点节点开始，向下搜索直到找到每个层级的最佳候选节点
                         Node<TItem> currObj = entryPointCopy;
 
                         if (currObj != null) {
@@ -346,6 +372,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
                                 }
                             }
 
+                            // 在每个层级上搜索最佳候选节点，并将新节点与候选节点互相连接
                             for (int level = Math.min(randomLevel, entryPointCopy.maxLevel()); level >= 0; level--) {
                                 PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates = searchBaseLayer(currObj, item.vector(), efConstruction, level);
 
@@ -362,7 +389,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
                             }
                         }
 
-                        // zoom out to the highest level
+                        // 如果新节点的最大层级大于入口点节点的最大层级，则将新节点设置为入口点节点
                         if (entryPoint == null || newNode.maxLevel() > entryPointCopy.maxLevel()) {
                             // 这是线程安全的，因为在添加level时获得了全局锁
                             this.entryPoint = newNode;
@@ -371,46 +398,70 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
                     }
                 }
             } finally {
+                // 从排除候选集合中删除新节点
                 synchronized (excludedCandidates) {
                     excludedCandidates.remove(newNodeId);
                 }
             }
         } finally {
+            // 释放全局锁
             if (globalLock.isHeldByCurrentThread()) {
                 globalLock.unlock();
             }
         }
     }
 
+
+    /**
+     * 将新节点与候选节点互相连接
+     *
+     * @param newNode       新节点
+     * @param topCandidates 候选节点
+     * @param level         当前层级
+     */
     private void mutuallyConnectNewElement(Node<TItem> newNode,
                                            PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates,
                                            int level) {
+        // 获取最佳候选节点的数量
         int bestN = level == 0 ? this.maxM0 : this.maxM;
 
+        // 获取新节点的 ID 和向量
         int newNodeId = newNode.id;
         TVector newItemVector = newNode.getItem().vector();
+
+        // 获取新节点在当前层级上的连接列表
         MutableIntList newItemConnections = newNode.connections[level];
 
+        // 根据启发式算法获取最佳候选节点
         getNeighborsByHeuristic2(topCandidates, m);
 
+        // 将新节点与每个最佳候选节点互相连接
         while (!topCandidates.isEmpty()) {
+            // 获取当前最佳候选节点的 ID
             int selectedNeighbourId = topCandidates.poll().nodeId;
 
+            // 如果当前最佳候选节点已经被排除，则跳过
             synchronized (excludedCandidates) {
                 if (excludedCandidates.contains(selectedNeighbourId)) {
                     continue;
                 }
             }
 
+            // 将当前最佳候选节点添加到新节点的连接列表中
             newItemConnections.add(selectedNeighbourId);
 
+            // 获取当前最佳候选节点
             Node<TItem> neighbourNode = nodes.get(selectedNeighbourId);
 
+            // 对当前最佳候选节点进行同步操作
             synchronized (neighbourNode) {
+                // 获取当前最佳候选节点的向量
                 TVector neighbourVector = neighbourNode.getItem().vector();
 
+                // 获取当前最佳候选节点在当前层级上的连接列表
                 MutableIntList neighbourConnectionsAtLevel = neighbourNode.connections[level];
 
+                // 如果当前最佳候选节点在当前层级上的连接列表未满，则将新节点添加到该列表中
                 if (neighbourConnectionsAtLevel.size() < bestN) {
                     neighbourConnectionsAtLevel.add(newNodeId);
                 } else {
@@ -420,11 +471,14 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
                             neighbourNode.getItem().vector()
                     );
 
+                    // 创建一个优先队列，用于存储当前最佳候选节点和它的连接列表中的节点
                     Comparator<NodeIdAndDistance<TDistance>> comparator = Comparator.<NodeIdAndDistance<TDistance>>naturalOrder().reversed();
-
                     PriorityQueue<NodeIdAndDistance<TDistance>> candidates = new PriorityQueue<>(comparator);
+
+                    // 将新节点添加到优先队列中
                     candidates.add(new NodeIdAndDistance<>(newNodeId, dMax, maxValueDistanceComparator));
 
+                    // 将当前最佳候选节点的连接列表中的节点添加到优先队列中
                     neighbourConnectionsAtLevel.forEach(id -> {
                         TDistance dist = distanceType.distance(
                                 neighbourVector,
@@ -434,10 +488,13 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
                         candidates.add(new NodeIdAndDistance<>(id, dist, maxValueDistanceComparator));
                     });
 
+                    // 根据启发式算法获取最佳候选节点
                     getNeighborsByHeuristic2(candidates, bestN);
 
+                    // 清空当前最佳候选节点在当前层级上的连接列表
                     neighbourConnectionsAtLevel.clear();
 
+                    // 将优先队列中的节点添加到当前最佳候选节点在当前层级上的连接列表中
                     while (!candidates.isEmpty()) {
                         neighbourConnectionsAtLevel.add(candidates.poll().nodeId);
                     }
@@ -446,89 +503,130 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
+
+    /**
+     * 通过启发式算法获取最佳候选节点
+     *
+     * @param topCandidates 候选节点
+     * @param m             最佳候选节点的数量
+     */
     private void getNeighborsByHeuristic2(PriorityQueue<NodeIdAndDistance<TDistance>> topCandidates, int m) {
 
+        // 如果候选节点数量小于最佳候选节点数量，则直接返回
         if (topCandidates.size() < m) {
             return;
         }
 
+        // 创建一个按距离排序的优先队列
         PriorityQueue<NodeIdAndDistance<TDistance>> queueClosest = new PriorityQueue<>();
+        // 创建一个用于存储最佳候选节点的列表
         List<NodeIdAndDistance<TDistance>> returnList = new ArrayList<>();
 
+        // 将候选节点添加到按距离排序的优先队列中
         while (!topCandidates.isEmpty()) {
             queueClosest.add(topCandidates.poll());
         }
 
+        // 从按距离排序的优先队列中选取最佳候选节点
         while (!queueClosest.isEmpty()) {
+            // 如果已经选取了足够数量的最佳候选节点，则退出循环
             if (returnList.size() >= m) {
                 break;
             }
 
+            // 获取当前距离最近的候选节点
             NodeIdAndDistance<TDistance> currentPair = queueClosest.poll();
 
+            // 获取当前距离最近的候选节点与查询节点之间的距离
             TDistance distToQuery = currentPair.distance;
 
+            // 判断当前距离最近的候选节点是否为最佳候选节点
             boolean good = true;
 
+            // 遍历已选取的最佳候选节点
             for (NodeIdAndDistance<TDistance> secondPair : returnList) {
-
+                // 获取当前已选取的最佳候选节点与当前距离最近的候选节点之间的距离
                 TDistance curDist = distanceType.distance(
                         nodes.get(secondPair.nodeId).getItem().vector(),
                         nodes.get(currentPair.nodeId).getItem().vector()
                 );
 
+                // 如果当前已选取的最佳候选节点与当前距离最近的候选节点之间的距离小于当前距离最近的候选节点与查询节点之间的距离，则当前距离最近的候选节点不是最佳候选节点
                 if (lt(curDist, distToQuery)) {
                     good = false;
                     break;
                 }
             }
+            // 如果当前距离最近的候选节点是最佳候选节点，则将其添加到最佳候选节点列表中
             if (good) {
                 returnList.add(currentPair);
             }
         }
 
+        // 将最佳候选节点列表中的节点添加到候选节点列表中
         topCandidates.addAll(returnList);
     }
 
+    /**
+     * 从索引中删除指定 ID 的项
+     *
+     * @param id      要删除的项的 ID
+     * @param version 要删除的项的版本号
+     * @return 是否删除成功
+     */
     @Override
     public boolean remove(TId id, long version) {
+        // 如果删除操作未启用，则直接返回删除失败
         if (!removeEnabled) {
             return false;
         }
 
+        // 获取全局锁
         globalLock.lock();
 
         try {
+            // 查找指定 ID 对应的内部节点 ID
             int internalNodeId = lookup.getIfAbsent(id, NO_NODE_ID);
+            // 如果指定 ID 对应的内部节点 ID 不存在，则直接返回删除失败
             if (internalNodeId == NO_NODE_ID) {
                 return false;
             }
 
+            // 获取指定 ID 对应的节点
             Node<TItem> node = nodes.get(internalNodeId);
 
+            // 如果指定 ID 对应的节点不存在，则直接返回删除失败
             if (node == null) {
                 return false;
             }
 
+            // 如果指定 ID 对应的节点的版本号大于要删除的版本号，则直接返回删除失败
             if (node.getItem().version() > version) {
                 return false;
             }
 
+            // 将指定 ID 对应的节点标记为已删除
             node.deleted = true;
 
+            // 从查找表中删除指定 ID
             lookup.remove(id);
 
+            // 将被删除的项的版本号添加到已删除项版本号列表中
             deletedItemVersions.put(id, version);
 
+            // 返回删除成功
             return true;
         } finally {
+            // 释放全局锁
             globalLock.unlock();
         }
     }
 
+
     /**
      * 返回索引中的项数 该方法是线程安全的 但是它的返回值可能不是最新的
      * 因为在返回值之后可能会有新的项被添加到索引中
+     *
      * @return 索引中的项数
      */
     @Override
@@ -541,7 +639,9 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
-    /** 获取item
+    /**
+     * 获取item
+     *
      * @param id item的id
      * @return item
      */
@@ -562,6 +662,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     /**
      * 返回索引中的所有项 该方法是线程安全的 但是它的返回值可能不是最新的
      * 因为在返回值之后可能会有新的项被添加到索引中
+     *
      * @return 索引中的所有项
      */
     @Override
@@ -584,8 +685,9 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 在HNSW索引中查找距离给定目标向量最近的k个邻居，并返回它们的搜索结果列表。
+     *
      * @param destination 向量
-     * @param k 数目
+     * @param k           数目
      * @return 搜索结果列表
      */
     @Override
@@ -663,6 +765,12 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         return results;
     }
 
+    /**
+     * 将 HNSW 索引保存到输出流中
+     *
+     * @param out 输出流
+     * @throws IOException 如果写入输出流时发生错误
+     */
     @Override
     public void save(OutputStream out) throws IOException {
         try (ObjectOutputStream oos = new ObjectOutputStream(out)) {
@@ -670,12 +778,14 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
+
     /**
-     * // 在 HNSW 索引中搜索基础层级，返回最近的候选对象的优先级队列
+     * 在 HNSW 索引中搜索基础层级，返回最近的候选对象的优先级队列
+     *
      * @param entryPointNode 入口点
-     * @param destination 目标向量
-     * @param k 数目
-     * @param layer 层级
+     * @param destination    目标向量
+     * @param k              数目
+     * @param layer          层级
      * @return 最近的候选对象的优先级队列
      */
     private PriorityQueue<NodeIdAndDistance<TDistance>> searchBaseLayer(
@@ -796,6 +906,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回存在当前Index下的items的维度
+     *
      * @return 维度
      */
     public int getDimensions() {
@@ -813,6 +924,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回搜索期间，最近邻节点的动态列表的大小
+     *
      * @return 最近邻节点的动态列表的大小
      */
     public int getEf() {
@@ -821,6 +933,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 设置搜索期间，最近邻节点的动态列表的大小
+     *
      * @param ef 最近邻节点的动态列表的大小
      */
     public void setEf(int ef) {
@@ -829,6 +942,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回相同含义的{@link #getEf()}ef，但是控制 index时间/index精度
+     *
      * @return
      */
     public int getEfConstruction() {
@@ -837,6 +951,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回距离函数的类型
+     *
      * @return 距离函数的类型
      */
     public DistanceType<TVector, TDistance> getDistanceType() {
@@ -845,6 +960,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回距离比较器
+     *
      * @return 距离比较器
      */
     public Comparator<TDistance> getDistanceComparator() {
@@ -853,6 +969,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回删除是否可用
+     *
      * @return 删除是否可用
      */
     public boolean isRemoveEnabled() {
@@ -861,6 +978,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回当前Index可以保持的最大节点的数量
+     *
      * @return 最大节点的数量
      */
     public int getMaxItemCount() {
@@ -869,6 +987,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回当保存Index时，用于序列化Item的id的序列化器
+     *
      * @return 序列化器
      */
     public ObjectSerializer<TId> getItemIdSerializer() {
@@ -877,182 +996,266 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 返回当保存Index时，用于序列化Item的vector的序列化器
+     *
      * @return 序列化器
      */
     public ObjectSerializer<TItem> getItemSerializer() {
         return itemSerializer;
     }
 
+    /**
+     * 将Index对象序列化到输出流中
+     *
+     * @param objectOutputStream 输出流
+     * @throws IOException IO异常
+     */
     private void writeObject(ObjectOutputStream objectOutputStream) throws IOException {
+        // 写入版本号
         objectOutputStream.writeByte(VERSION_1);
+        // 写入维度
         objectOutputStream.writeInt(dimensions);
+        // 写入距离类型
         objectOutputStream.writeObject(distanceType);
+        // 写入距离比较器
         objectOutputStream.writeObject(distanceComparator);
+        // 写入id序列化器
         objectOutputStream.writeObject(itemIdSerializer);
+        // 写入item序列化器
         objectOutputStream.writeObject(itemSerializer);
+        // 写入最大节点数量
         objectOutputStream.writeInt(maxItemCount);
+        // 写入m值
         objectOutputStream.writeInt(m);
+        // 写入最大m值
         objectOutputStream.writeInt(maxM);
+        // 写入最大m0值
         objectOutputStream.writeInt(maxM0);
+        // 写入levelLambda值
         objectOutputStream.writeDouble(levelLambda);
+        // 写入ef值
         objectOutputStream.writeInt(ef);
+        // 写入efConstruction值
         objectOutputStream.writeInt(efConstruction);
+        // 写入删除是否可用
         objectOutputStream.writeBoolean(removeEnabled);
+        // 写入节点数量
         objectOutputStream.writeInt(nodeCount);
+        // 写入lookup
         writeMutableObjectIntMap(objectOutputStream, lookup);
+        // 写入删除的item版本
         writeMutableObjectLongMap(objectOutputStream, deletedItemVersions);
+        // 写入节点数组
         writeNodesArray(objectOutputStream, nodes);
+        // 写入entryPoint
         objectOutputStream.writeInt(entryPoint == null ? -1 : entryPoint.id);
-
     }
 
+    /**
+     * 从输入流中反序列化Index对象
+     *
+     * @param objectInputStream 输入流
+     * @throws IOException            IO异常
+     * @throws ClassNotFoundException 类未找到异常
+     */
     @SuppressWarnings("unchecked")
     private void readObject(ObjectInputStream objectInputStream) throws IOException, ClassNotFoundException {
-        @SuppressWarnings("unused") byte version = objectInputStream.readByte(); // 用于应对未来不兼容的序列化版本
+        // 读取版本号，用于应对未来不兼容的序列化版本
+        @SuppressWarnings("unused") byte version = objectInputStream.readByte();
+        // 读取维度
         this.dimensions = objectInputStream.readInt();
+        // 读取距离类型
         this.distanceType = (DistanceType<TVector, TDistance>) objectInputStream.readObject();
+        // 读取距离比较器
         this.distanceComparator = (Comparator<TDistance>) objectInputStream.readObject();
+        // 创建最大值比较器
         this.maxValueDistanceComparator = new MaxValueComparator<>(distanceComparator);
+        // 读取id序列化器
         this.itemIdSerializer = (ObjectSerializer<TId>) objectInputStream.readObject();
+        // 读取item序列化器
         this.itemSerializer = (ObjectSerializer<TItem>) objectInputStream.readObject();
-
+        // 读取最大节点数量
         this.maxItemCount = objectInputStream.readInt();
+        // 读取m值
         this.m = objectInputStream.readInt();
+        // 读取最大m值
         this.maxM = objectInputStream.readInt();
+        // 读取最大m0值
         this.maxM0 = objectInputStream.readInt();
+        // 读取levelLambda值
         this.levelLambda = objectInputStream.readDouble();
+        // 读取ef值
         this.ef = objectInputStream.readInt();
+        // 读取efConstruction值
         this.efConstruction = objectInputStream.readInt();
+        // 读取删除是否可用
         this.removeEnabled = objectInputStream.readBoolean();
+        // 读取节点数量
         this.nodeCount = objectInputStream.readInt();
+        // 读取lookup
         this.lookup = readMutableObjectIntMap(objectInputStream, itemIdSerializer);
+        // 读取删除的item版本
         this.deletedItemVersions = readMutableObjectLongMap(objectInputStream, itemIdSerializer);
+        // 读取节点数组
         this.nodes = readNodesArray(objectInputStream, itemSerializer, maxM0, maxM);
-
+        // 读取entryPoint
         int entryPointNodeId = objectInputStream.readInt();
-        this.entryPoint = entryPointNodeId == -1 ? null : nodes.get(entryPointNodeId); // TODO
+        this.entryPoint = entryPointNodeId == -1 ? null : nodes.get(entryPointNodeId);
 
+        // 初始化全局锁
         this.globalLock = new ReentrantLock();
+        // 初始化已访问过的节点的位集合对象池
         this.visitedBitSetPool = new GenericObjectPool<>(() -> new ArrayBitSet(this.maxItemCount),
                 Runtime.getRuntime().availableProcessors());
+        // 初始化排除候选集合
         this.excludedCandidates = new ArrayBitSet(this.maxItemCount);
+        // 初始化item锁
         this.itemLocks = new HashMap<>();
+        // 初始化只读视图
         this.exactView = new ExactView();
     }
 
     /**
-     * // TODO
-     * @param objectOutputStream
-     * @param map
-     * @throws IOException
+     * 将可变对象和整数映射写入对象输出流中
+     *
+     * @param objectOutputStream 对象输出流
+     * @param map                可变对象和整数映射
+     * @throws IOException IO异常
      */
     private void writeMutableObjectIntMap(ObjectOutputStream objectOutputStream, MutableObjectIntMap<TId> map) throws IOException {
+        // 写入映射的大小
         objectOutputStream.writeInt(map.size());
 
+        // 遍历映射中的键值对，将键和值写入对象输出流中
         for (ObjectIntPair<TId> pair : map.keyValuesView()) {
+            // 写入键
             itemIdSerializer.write(pair.getOne(), objectOutputStream);
+            // 写入值
             objectOutputStream.writeInt(pair.getTwo());
         }
     }
 
+
     /**
-     * // TODO
-     * @param objectOutputStream
-     * @param map
-     * @throws IOException
+     * 将可变对象和长整型映射写入对象输出流中
+     *
+     * @param objectOutputStream 对象输出流
+     * @param map                可变对象和长整型映射
+     * @throws IOException IO异常
      */
     private void writeMutableObjectLongMap(ObjectOutputStream objectOutputStream, MutableObjectLongMap<TId> map) throws IOException {
+        // 写入映射的大小
         objectOutputStream.writeInt(map.size());
 
+        // 遍历映射中的键值对，将键和值写入对象输出流中
         for (ObjectLongPair<TId> pair : map.keyValuesView()) {
+            // 写入键
             itemIdSerializer.write(pair.getOne(), objectOutputStream);
+            // 写入值
             objectOutputStream.writeLong(pair.getTwo());
         }
     }
 
+
     /**
-     * // TODO
-     * @param objectOutputStream
-     * @param nodes
-     * @throws IOException
+     * 将节点数组写入对象输出流中
+     *
+     * @param objectOutputStream 对象输出流
+     * @param nodes              节点数组
+     * @throws IOException IO异常
      */
     private void writeNodesArray(ObjectOutputStream objectOutputStream, AtomicReferenceArray<Node<TItem>> nodes)
-        throws IOException {
+            throws IOException {
+        // 写入节点数组的长度
         objectOutputStream.writeInt(nodes.length());
 
+        // 遍历节点数组，将每个节点写入对象输出流中
         for (int i = 0; i < nodes.length(); i++) {
             writeNode(objectOutputStream, nodes.get(i));
         }
     }
 
+
     /**
-     * // TODO
-     * @param objectOutputStream
-     * @param node
-     * @throws IOException
+     * 将节点写入对象输出流中
+     *
+     * @param objectOutputStream 对象输出流
+     * @param node               节点
+     * @throws IOException IO异常
      */
     private void writeNode(ObjectOutputStream objectOutputStream, Node<TItem> node) throws IOException {
         if (node == null) {
+            // 如果节点为空，写入-1
             objectOutputStream.writeInt(-1);
         } else {
+            // 否则，写入节点id和连接数
             objectOutputStream.writeInt(node.id);
             objectOutputStream.writeInt(node.connections.length);
 
+            // 遍历节点的连接，将每个连接写入对象输出流中
             for (MutableIntList connection : node.connections) {
+                // 写入连接的大小
                 objectOutputStream.writeInt(connection.size());
 
+                // 遍历连接中的每个元素，将每个元素写入对象输出流中
                 for (int i = 0; i < connection.size(); i++) {
                     objectOutputStream.writeInt(connection.get(i));
 
+                    // 遍历连接中的每个元素，将每个元素写入对象输出流中
                     for (int j = 0; j < connection.size(); j++) {
                         objectOutputStream.writeInt(connection.get(j));
                     }
                 }
+                // 写入节点的item
                 itemSerializer.write(node.item, objectOutputStream);
+                // 写入节点是否被删除
                 objectOutputStream.writeBoolean(node.deleted);
             }
         }
     }
 
+
     /**
      * 从文件中载入索引 HnswIndex
-     * @param file 文件 File
-     * @return 索引 HnswIndex
-     * @param <TId> id 类型
-     * @param <TVector> 向量类型
-     * @param <TItem> item 类型
+     *
+     * @param file        文件 File
+     * @param <TId>       id 类型
+     * @param <TVector>   向量类型
+     * @param <TItem>     item 类型
      * @param <TDistance> 距离类型
+     * @return 索引 HnswIndex
      * @throws IOException IO 异常
      */
     public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(File file)
-        throws IOException {
+            throws IOException {
         return load(new FileInputStream(file));
     }
 
     /**
      * 从文件中载入索引 HnswIndex
-     * @param file 文件 File
+     *
+     * @param file        文件 File
      * @param classLoader 类加载器 ClassLoader
-     * @return 索引 HnswIndex
-     * @param <TId> id 类型
-     * @param <TVector> 向量类型
-     * @param <TItem> item 类型
+     * @param <TId>       id 类型
+     * @param <TVector>   向量类型
+     * @param <TItem>     item 类型
      * @param <TDistance> 距离类型
+     * @return 索引 HnswIndex
      * @throws IOException IO 异常
      */
     public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(File file, ClassLoader classLoader)
-        throws IOException {
+            throws IOException {
         return load(new FileInputStream(file), classLoader);
     }
 
     /**
      * 从路径中载入索引 HnswIndex
-     * @param path 路径 Path
-     * @return 索引 HnswIndex
-     * @param <TId> id 类型
-     * @param <TVector> 向量类型
-     * @param <TItem> item 类型
+     *
+     * @param path        路径 Path
+     * @param <TId>       id 类型
+     * @param <TVector>   向量类型
+     * @param <TItem>     item 类型
      * @param <TDistance> 距离类型
+     * @return 索引 HnswIndex
      * @throws IOException IO 异常
      */
     public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(Path path)
@@ -1062,13 +1265,14 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 从路径中载入索引 HnswIndex
-     * @param path 路径 Path
+     *
+     * @param path        路径 Path
      * @param classLoader 类加载器 ClassLoader
-     * @return 索引 HnswIndex
-     * @param <TId> id 类型
-     * @param <TVector> 向量类型
-     * @param <TItem> item 类型
+     * @param <TId>       id 类型
+     * @param <TVector>   向量类型
+     * @param <TItem>     item 类型
      * @param <TDistance> 距离类型
+     * @return 索引 HnswIndex
      * @throws IOException IO 异常
      */
     public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(Path path, ClassLoader classLoader)
@@ -1078,13 +1282,14 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 从输入流中载入索引 HnswIndex
+     *
      * @param inputStream 输入流
-     * @return 索引 HnswIndex
-     * @param <TId> id 类型
-     * @param <TVector> 向量类型
-     * @param <TItem> item 类型
+     * @param <TId>       id 类型
+     * @param <TVector>   向量类型
+     * @param <TItem>     item 类型
      * @param <TDistance> 距离类型
-     * @throws IOException IO 异常
+     * @return 索引 HnswIndex
+     * @throws IOException              IO 异常
      * @throws IllegalArgumentException 找不到用于载入的文件
      */
     public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(InputStream inputStream)
@@ -1094,31 +1299,43 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 从输入流中载入索引 HnswIndex
+     *
      * @param inputStream 输入流
      * @param classLoader 类加载器
-     * @return 索引 HnswIndex
-     * @param <TId> id 类型
-     * @param <TVector> 向量类型
-     * @param <TItem> item 类型
+     * @param <TId>       id 类型
+     * @param <TVector>   向量类型
+     * @param <TItem>     item 类型
      * @param <TDistance> 距离类型
-     * @throws IOException IO 异常
+     * @return 索引 HnswIndex
+     * @throws IOException              IO 异常
      * @throws IllegalArgumentException 找不到用于载入的文件
      */
     @SuppressWarnings("unchecked")
     public static <TId, TVector, TItem extends Item<TId, TVector>, TDistance> HnswIndex<TId, TVector, TItem, TDistance> load(InputStream inputStream, ClassLoader classLoader)
             throws IOException {
-        try(ObjectInputStream ois = new ClassLoaderObjectInputStream(classLoader, inputStream)) {
+        try (ObjectInputStream ois = new ClassLoaderObjectInputStream(classLoader, inputStream)) {
             return (HnswIndex<TId, TVector, TItem, TDistance>) ois.readObject();
         } catch (ClassNotFoundException e) {
             throw new IllegalArgumentException("找不到用于载入的文件", e);
         }
     }
 
+    /**
+     * 从 ObjectInputStream 中读取 IntArrayList
+     *
+     * @param ois         ObjectInputStream 对象
+     * @param initialSize IntArrayList 的初始大小
+     * @return 读取到的 IntArrayList 对象
+     * @throws IOException IO 异常
+     */
     private static IntArrayList readIntArrayList(ObjectInputStream ois, int initialSize) throws IOException {
+        // 读取 IntArrayList 的大小
         int size = ois.readInt();
 
+        // 创建 IntArrayList 对象
         IntArrayList list = new IntArrayList(initialSize);
 
+        // 读取 IntArrayList 中的元素
         for (int j = 0; j < size; j++) {
             list.add(ois.readInt());
         }
@@ -1126,6 +1343,19 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         return list;
     }
 
+
+    /**
+     * 从 ObjectInputStream 中读取 Node 对象
+     *
+     * @param ois            ObjectInputStream 对象
+     * @param itemSerializer ItemSerializer 对象
+     * @param maxM0          0 级最大 M 值
+     * @param maxM           最大 M 值
+     * @param <TItem>        item 类型
+     * @return 读取到的 Node 对象
+     * @throws IOException            IO 异常
+     * @throws ClassNotFoundException 找不到类异常
+     */
     private static <TItem> Node<TItem> readNode(ObjectInputStream ois,
                                                 ObjectSerializer<TItem> itemSerializer,
                                                 int maxM0,
@@ -1153,6 +1383,18 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         }
     }
 
+    /**
+     * 从 ObjectInputStream 中读取 AtomicReferenceArray<Node> 对象
+     *
+     * @param ois            ObjectInputStream 对象
+     * @param itemSerializer ItemSerializer 对象
+     * @param maxM0          0 级最大 M 值
+     * @param maxM           最大 M 值
+     * @param <TItem>        item 类型
+     * @return 读取到的 AtomicReferenceArray<Node> 对象
+     * @throws IOException            IO 异常
+     * @throws ClassNotFoundException 找不到类异常
+     */
     private static <TItem> AtomicReferenceArray<Node<TItem>> readNodesArray(ObjectInputStream ois,
                                                                             ObjectSerializer<TItem> itemSerializer,
                                                                             int maxM0,
@@ -1169,6 +1411,16 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         return nodes;
     }
 
+    /**
+     * 从 ObjectInputStream 中读取 MutableObjectIntMap 对象
+     *
+     * @param ois              ObjectInputStream 对象
+     * @param itemIdSerializer ItemIdSerializer 对象
+     * @param <TId>            id 类型
+     * @return 读取到的 MutableObjectIntMap 对象
+     * @throws IOException            IO 异常
+     * @throws ClassNotFoundException 找不到类异常
+     */
     private static <TId> MutableObjectIntMap<TId> readMutableObjectIntMap(ObjectInputStream ois,
                                                                           ObjectSerializer<TId> itemIdSerializer)
             throws IOException, ClassNotFoundException {
@@ -1186,6 +1438,16 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         return map;
     }
 
+    /**
+     * 从 ObjectInputStream 中读取 MutableObjectLongMap 对象
+     *
+     * @param ois              ObjectInputStream 对象
+     * @param itemIdSerializer ItemIdSerializer 对象
+     * @param <TId>            id 类型
+     * @return 读取到的 MutableObjectLongMap 对象
+     * @throws IOException            IO 异常
+     * @throws ClassNotFoundException 找不到类异常
+     */
     private static <TId> MutableObjectLongMap<TId> readMutableObjectLongMap(ObjectInputStream ois,
                                                                             ObjectSerializer<TId> itemIdSerializer)
             throws IOException, ClassNotFoundException {
@@ -1205,12 +1467,13 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 由新建一个HNSW index开始程序
-     * @param dimensions 向量维度
+     *
+     * @param dimensions   向量维度
      * @param distanceType 距离函数
      * @param maxItemCount 最大item数量
+     * @param <TVector>    向量类型
+     * @param <TDistance>  距离类型
      * @return Builder
-     * @param <TVector> 向量类型
-     * @param <TDistance> 距离类型
      */
     public static <TVector, TDistance extends Comparable<TDistance>> Builder<TVector, TDistance> newBuilder(
             int dimensions,
@@ -1224,13 +1487,14 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 由新建一个HNSW index开始程序
-     * @param dimensions 向量维度
-     * @param distanceType 距离函数
+     *
+     * @param dimensions         向量维度
+     * @param distanceType       距离函数
      * @param distanceComparator 距离比较器
-     * @param maxItemCount 最大item数量
+     * @param maxItemCount       最大item数量
+     * @param <TVector>          向量类型
+     * @param <TDistance>        距离类型
      * @return Builder
-     * @param <TVector> 向量类型
-     * @param <TDistance> 距离类型
      */
     public static <TVector, TDistance> Builder<TVector, TDistance> newBuilder(
             int dimensions,
@@ -1243,6 +1507,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * resize新的大小 重新分配内存
+     *
      * @param newSize 新的大小
      */
     public void resize(int newSize) {
@@ -1283,6 +1548,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * hasNext()方法的实现
+         *
          * @return 是否还有下一个元素
          */
         @Override
@@ -1292,6 +1558,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * next()方法的实现
+         *
          * @return 下一个元素
          */
         @Override
@@ -1310,7 +1577,8 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 根据给定的值和参数 lambda 分配一个层级值。用于在 HNSW 索引结构中确定节点的连接和搜索路径。
-     * @param value 要分配层级的值
+     *
+     * @param value  要分配层级的值
      * @param lambda 控制层级分配的参数
      * @return 分配的层级值
      */
@@ -1353,25 +1621,53 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         return maxValueDistanceComparator.compare(a, b) > 0;
     }
 
+    /**
+     * 用于存储节点ID和距离的类
+     *
+     * @param <TDistance> 距离类型
+     */
     static class NodeIdAndDistance<TDistance> implements Comparable<NodeIdAndDistance<TDistance>> {
 
+        /**
+         * 节点ID
+         */
         final int nodeId;
 
+        /**
+         * 距离
+         */
         final TDistance distance;
 
+        /**
+         * 距离比较器
+         */
         final Comparator<TDistance> distanceComparator;
 
+        /**
+         * 构造函数
+         *
+         * @param nodeId             节点ID
+         * @param distance           距离
+         * @param distanceComparator 距离比较器
+         */
         NodeIdAndDistance(int nodeId, TDistance distance, Comparator<TDistance> distanceComparator) {
             this.nodeId = nodeId;
             this.distance = distance;
             this.distanceComparator = distanceComparator;
         }
 
+        /**
+         * 用于比较两个NodeIdAndDistance对象的距离大小
+         *
+         * @param o 另一个NodeIdAndDistance对象
+         * @return 如果当前对象的距离小于另一个对象的距离，则返回负整数；如果当前对象的距离等于另一个对象的距离，则返回0；否则返回正整数
+         */
         @Override
         public int compareTo(NodeIdAndDistance<TDistance> o) {
             return distanceComparator.compare(distance, o.distance);
         }
     }
+
 
     /**
      * HNSW索引的构造函数 用于创建一个新的HNSW索引 该索引使用默认的参数
@@ -1385,6 +1681,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 新增一个item
+         *
          * @param item item
          * @return 是否成功
          */
@@ -1395,7 +1692,8 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 删除一个item
-         * @param id item的id
+         *
+         * @param id      item的id
          * @param version item的版本
          * @return 是否成功
          */
@@ -1406,6 +1704,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 获取item的数量
+         *
          * @return item的数量
          */
         @Override
@@ -1420,6 +1719,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 获取所有的item
+         *
          * @return 所有的item
          */
         @Override
@@ -1429,8 +1729,9 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 查找最近的向量k个 这是一个精确的方法，它遍历所有的向量。
+         *
          * @param vector 向量
-         * @param k 数目
+         * @param k      数目
          * @return 最近的向量k个
          */
         @Override
@@ -1470,6 +1771,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 保存Index到输出流
+         *
          * @param out Index的输出流
          * @throws IOException IO异常
          */
@@ -1480,6 +1782,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 保存Index到文件
+         *
          * @param file Index的文件
          * @throws IOException IO异常
          */
@@ -1490,6 +1793,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 保存Index到路径
+         *
          * @param path Index的路径
          * @throws IOException IO异常
          */
@@ -1500,6 +1804,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 添加所有的item
+         *
          * @param items item的集合
          * @throws InterruptedException 中断异常
          */
@@ -1510,7 +1815,8 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 添加所有的item
-         * @param items item的集合
+         *
+         * @param items    item的集合
          * @param listener 进度监听器
          * @throws InterruptedException 中断异常
          */
@@ -1521,9 +1827,10 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 添加所有的item
-         * @param items item的集合
+         *
+         * @param items      item的集合
          * @param numThreads 线程数
-         * @param listener 进度监听器
+         * @param listener   进度监听器
          * @throws InterruptedException 中断异常
          */
         public void addAll(Collection<TItem> items, int numThreads, ProgressListener listener, int progressUpdateInterval) throws InterruptedException {
@@ -1533,6 +1840,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * 节点
+     *
      * @param <TItem> Item的类型
      */
     @Data
@@ -1572,6 +1880,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 节点的最大层级
+         *
          * @return 节点的最大层级
          */
         int maxLevel() {
@@ -1594,6 +1903,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 构造方法
+         *
          * @param delegate 用于比较距离的比较器
          */
         MaxValueComparator(Comparator<TDistance> delegate) {
@@ -1602,6 +1912,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 比较两个对象。如果第一个对象大于第二个对象，则返回正整数；如果第一个对象小于第二个对象，则返回负整数；如果两个对象相等，则返回0。
+         *
          * @param o1 第一个被比较的对象
          * @param o2 第二个被比较的对象
          * @return 如果第一个对象大于第二个对象，则返回正整数；如果第一个对象小于第二个对象，则返回负整数；如果两个对象相等，则返回0。
@@ -1618,7 +1929,8 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * Builder构建器
-     * @param <TVector> 向量的类型
+     *
+     * @param <TVector>   向量的类型
      * @param <TDistance> 距离的类型
      */
     public static class Builder<TVector, TDistance> extends BuilderBase<Builder<TVector, TDistance>, TVector, TDistance> {
@@ -1642,6 +1954,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 构建Index Builder
+         *
          * @return Index
          */
         public <TId, TItem extends Item<TId, TVector>> RefinedBuilder<TId, TVector, TItem, TDistance> withCustomSerializers(
@@ -1663,9 +1976,10 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
     /**
      * Builder构建器
-     * @param <TId> ID的类型
-     * @param <TVector> 向量的类型
-     * @param <TItem> Item的类型
+     *
+     * @param <TId>       ID的类型
+     * @param <TVector>   向量的类型
+     * @param <TItem>     Item的类型
      * @param <TDistance> 距离的类型
      */
     public static class RefinedBuilder<TId, TVector, TItem extends Item<TId, TVector>, TDistance>
@@ -1706,9 +2020,10 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 构建Index Builder
+         *
          * @return Index
          */
-        public RefinedBuilder<TId, TVector, TItem, TDistance> withCustomSerializers (
+        public RefinedBuilder<TId, TVector, TItem, TDistance> withCustomSerializers(
                 ObjectSerializer<TId> itemIdSerializer,
                 ObjectSerializer<TItem> itemSerializer
         ) {
@@ -1720,6 +2035,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 构建Index
+         *
          * @return Index
          */
         public HnswIndex<TId, TVector, TItem, TDistance> build() {
@@ -1732,8 +2048,9 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     /**
      * 构建器基类 (BuilderBase) 是一个抽象类，它实现了 Builder 接口，并且提供了一些默认的实现。
      * 它的子类可以通过继承它来实现自己的构建器。
-     * @param <TBuilder> 构建器的类型
-     * @param <TVector> 向量的类型
+     *
+     * @param <TBuilder>  构建器的类型
+     * @param <TVector>   向量的类型
      * @param <TDistance> 距离的类型
      */
     public static abstract class BuilderBase<TBuilder extends BuilderBase<TBuilder, TVector, TDistance>, TVector, TDistance> {
@@ -1775,7 +2092,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 最大的Item数量
-         * */
+         */
         int maxItemCount;
 
         /**
@@ -1790,7 +2107,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 控制索引构建时间/索引精度的参数
-         * */
+         */
         int efConstruction = DEFAULT_EF_CONSTRUCTION;
 
         /**
@@ -1800,10 +2117,11 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 构造方法
-         * @param dimensions 向量的维度
-         * @param distanceType 距离的类型
+         *
+         * @param dimensions         向量的维度
+         * @param distanceType       距离的类型
          * @param distanceComparator 用于比较距离的比较器
-         * @param maxItemCount 最大的Item数量
+         * @param maxItemCount       最大的Item数量
          */
         BuilderBase(int dimensions,
                     DistanceType<TVector, TDistance> distanceType,
@@ -1818,6 +2136,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
         /**
          * 获取构建器 这个方法的作用是返回当前的构建器对象本身，即返回一个具体类型为 TBuilder 的构建器对象。
          * 目的是支持方法链式调用（Method Chaining），使构建器的连续调用更加优雅和便捷。
+         *
          * @return 构建器
          */
         abstract TBuilder self();
@@ -1870,6 +2189,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
         /**
          * 启用索引的实验性移除操作（remove）
+         *
          * @param removeEnabled 是否允许删除节点
          * @return 构建器
          */
