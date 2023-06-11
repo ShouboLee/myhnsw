@@ -251,7 +251,7 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     public boolean add(TItem item) {
         // 检查数据点的维度是否正确
         if (item.dimensions() != dimensions) {
-            throw new IllegalArgumentException("Item没有维度: {}" + dimensions);
+            throw new IllegalArgumentException("Item维度不正确, item维度: " + item.dimensions() + " Index维度: " + dimensions);
         }
 
         // 为新节点分配随机层级
