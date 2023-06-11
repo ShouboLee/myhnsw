@@ -159,6 +159,8 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     /**
      * 已删除数据点的版本记录
      * deletedItemVersions是一个映射结构，用于记录已删除数据点的版本信息。
+     * 在HNSW算法中，支持删除操作，即从索引中移除特定的数据点。
+     * 为了确保删除操作的正确性，需要记录每个数据点的版本信息
      */
     private MutableObjectLongMap<TId> deletedItemVersions;
 
@@ -278,17 +280,21 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
 
                 Node<TItem> node = nodes.get(existingNodeId);
 
+                // 如果数据点的版本号小于等于已存在节点的版本号，则不更新数据点
                 if (item.version() < node.getItem().version()) {
                     return false;
                 }
 
+                // 如果数据点的向量与已存在节点的向量相同，则更新已存在节点的数据
                 if (Objects.deepEquals(node.getItem().vector(), item.vector())) {
                     node.item = item;
                     return true;
                 } else {
+                    // 如果数据点的向量与已存在节点的向量不同，则删除已存在节点，以便添加新的数据点
                     remove(item.id(), item.version());
                 }
             } else if (item.version() < deletedItemVersions.getIfAbsent(item.id(), -1)) {
+                // 如果数据点已被删除，则不添加数据点
                 return false;
             }
 
@@ -640,24 +646,30 @@ public class HnswIndex<TId, TVector, TItem extends Item<TId, TVector>, TDistance
     }
 
     /**
-     * 获取item
+     * 根据 ID 获取索引中的项
      *
-     * @param id item的id
-     * @return item
+     * @param id 要获取的项的 ID
+     * @return 如果索引中存在指定 ID 的项，则返回该项，否则返回 Optional.empty()
      */
     @Override
     public Optional<TItem> get(TId id) {
+        // 获取全局锁
         globalLock.lock();
         try {
+            // 查找指定 ID 对应的内部节点 ID
             int nodeId = lookup.getIfAbsent(id, NO_NODE_ID);
+            // 如果指定 ID 对应的内部节点 ID 不存在，则返回 Optional.empty()
             if (nodeId == NO_NODE_ID) {
                 return Optional.empty();
             }
+            // 返回指定 ID 对应的节点的项
             return Optional.ofNullable(nodes.get(nodeId)).map(Node::getItem);
         } finally {
+            // 释放全局锁
             globalLock.unlock();
         }
     }
+
 
     /**
      * 返回索引中的所有项 该方法是线程安全的 但是它的返回值可能不是最新的
